@@ -1,0 +1,128 @@
+# akamai-workshop-platform
+
+`akamai-workshop-platform` provisions a per-student GPU workshop classroom on [Akamai Cloud](https://www.linode.com/) (Linode LKE) with one interactive wizard, then tears it down with one command. The platform provides the core infrastructure: per-student browser IDEs ([code-server](https://github.com/coder/code-server)), GPU [vLLM](https://github.com/vllm-project/vllm) inference, student URLs and passwords, TLS, and Kubernetes networking. You point it at any content repo, answer about five questions, confirm a cost preview, and get a running classroom plus a CSV of student URLs and passwords.
+
+The [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop) is the default content, not the product. Any content repo works.
+
+## Prerequisites
+
+**Account:**
+
+- Create an [Akamai Cloud account](http://login.linode.com/signup?promo=akm-dev-git-300-31126-M055) with an API token (includes free credit). Export the token before you deploy: `export TF_VAR_token="your-linode-api-token"`. The wizard reads it from `$TF_VAR_token` or `$LINODE_TOKEN` and never writes it to a file.
+
+**Tools:**
+
+- [Terraform](https://terraform.io) version 1.5 or later
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- `bash`, `python3`, and `openssl`, which are standard on macOS and Linux
+
+You do not need a HuggingFace token, because the model menu is ungated only. You do not need Docker or a registry login.
+
+## Architecture
+
+![akamai-workshop-platform architecture](infra/docs/architecture.png)
+
+## What it does
+
+- **Self-service:** an interactive wizard collects the student count, model, content repo, domain, and region.
+- **Autopilot sizing:** the wizard picks the GPU plan, tensor-parallel size, and replica and node counts from the student count and model, then shows a `$/hr` and class-cost preview before anything bills.
+- **Content-agnostic:** the platform clones your `content_repo` into each workspace at pod startup, with no image rebuild and no registry login. See [`examples/README.md`](examples/README.md).
+- **Domain-optional:** with no domain, the platform uses `sslip.io` hostnames and self-signed TLS (the default). With a domain, it uses Linode DNS and a Let's Encrypt wildcard certificate.
+- **Live region and capacity check:** the wizard discovers GPU-capable regions and validates GPU capacity before provisioning, so a capacity shortage never leaves a partially built cluster that keeps billing.
+- **Private inference:** vLLM stays cluster-internal behind a ClusterIP service and a default-deny NetworkPolicy. Off-cluster access uses `kubectl port-forward` only, with no public endpoint.
+
+## Quick start
+
+This path uses no domain, so the platform serves `sslip.io` hostnames with self-signed TLS.
+
+```bash
+export TF_VAR_token="your-linode-api-token"
+
+# See the plan and cost first. This creates nothing:
+./deploy.sh --dry-run --students 80 --model Qwen/Qwen3-8B-FP8
+
+# Interactive: asks for students, model, content repo, domain, and region,
+# shows a cost preview, provisions the classroom, then writes access-cards.csv:
+make deploy            # or: ./deploy.sh
+
+# Tear it down when class ends. This stops billing:
+make teardown          # or: ./deploy.sh teardown
+```
+
+After the deploy finishes, you can view student URLs and passwords in three ways:
+
+```bash
+# View the raw CSV
+cat infra/manifests/generated/access-cards.csv
+
+# Generate printable HTML cards (one per student, ready to cut and hand out)
+./infra/scripts/print-access-cards.sh
+open infra/manifests/generated/access-cards.html
+```
+
+The CSV contains one row per student with `student_number`, `url`, and `password` columns.
+
+For non-interactive runs (CI or scripted), copy `config.example.yaml` to `config.yaml`, edit it, then run:
+
+```bash
+./deploy.sh --yes --config config.yaml
+```
+
+Run `make help` to list every front-door target.
+
+>!!!warning
+>GPU nodes bill by the hour. Always run `make teardown` (or `./deploy.sh teardown`) when class ends, so the cluster stops billing.
+
+## Inputs
+
+These five inputs are the entire user surface. Anything you omit is filled by the wizard's autopilot.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `students` | required | Number of student workspaces to create |
+| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id. Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
+| `content_repo` | `ai-agents-workshop` | Git repo cloned into each workspace at startup |
+| `domain` | `""` (no domain) | Empty uses `sslip.io` and self-signed TLS. A value uses Linode DNS and Let's Encrypt. |
+| `region` | nearest GPU region | Chosen from the live list of GPU-capable Akamai regions |
+
+## TLS and domains
+
+The preferred method is to bring your own domain. When you provide a domain, the platform creates Linode DNS records and provisions a free Let's Encrypt wildcard certificate automatically. Students get trusted HTTPS with no browser warnings.
+
+```bash
+./deploy.sh deploy --domain example.com
+# Students get: https://s01.workshop.example.com/
+```
+
+If you deploy without a domain (the default), the platform uses [sslip.io](https://sslip.io) for DNS. sslip.io is a free public DNS service that maps hostnames like `172-238-62-203.sslip.io` to the embedded IP address. This gives each student a unique subdomain for ingress routing without any domain purchase or DNS configuration.
+
+Because you do not control the `sslip.io` DNS zone, the platform cannot complete a Let's Encrypt DNS-01 challenge. It falls back to a self-signed certificate instead. The connection is still encrypted, but browsers show a "Not Secure" warning. Students accept the warning once and proceed normally.
+
+>!note
+>For production or customer-facing workshops, use a real domain. For internal testing or instructor-led sessions where you can walk students through the browser warning, sslip.io works fine.
+
+## Cost
+
+GPU nodes bill by the hour, and the wizard prints an estimate before you confirm. A typical 80-student class (`Qwen3-8B-FP8` on 5 `g2-gpu-rtx4000a4-s` GPU nodes plus 5 CPU nodes) costs roughly **$15.88/hr**, or about $64 for a 4-hour class. A single-GPU capacity-probe box (one `g2-gpu-rtx4000a1-s` GPU node plus one CPU node) costs about $0.74/hr.
+
+For the full breakdown, the sizing formula, and the GPU-plan decode, see [`infra/docs/cost.md`](infra/docs/cost.md) and [`infra/docs/sizing.md`](infra/docs/sizing.md).
+
+## Documentation
+
+- [`PLATFORM-PLAN.md`](PLATFORM-PLAN.md): the full design blueprint
+- [`infra/README.md`](infra/README.md): infrastructure details
+- [`infra/docs/quickstart.md`](infra/docs/quickstart.md): step-by-step deploy, port-forward, and teardown
+- [`infra/docs/architecture.md`](infra/docs/architecture.md): the layers, the Helm chart, and what each value controls
+- [`infra/docs/sizing.md`](infra/docs/sizing.md): GPU-plan decode, the sizing formula, model catalog, and regions
+- [`infra/docs/cost.md`](infra/docs/cost.md): the `$/hr` breakdown and how to keep the bill down
+- [`examples/README.md`](examples/README.md): default content and how to bring your own
+- [`infra/docs/runbook.md`](infra/docs/runbook.md), [`infra/docs/security.md`](infra/docs/security.md), and [`infra/docs/troubleshooting.md`](infra/docs/troubleshooting.md): operations, security posture, and troubleshooting
+
+## About the Author
+
+>This project was created by **Du'An Lightfoot**, a developer passionate about AI agents, cloud infrastructure, and teaching in public.
+>
+>Learn more and connect:
+>- 🌐 Website: [duanlightfoot.com](https://duanlightfoot.com)
+>- 📺 YouTube: [@LabEveryday](https://www.youtube.com/@LabEveryday)
+>- 🐙 GitHub: [@labeveryday](https://github.com/labeveryday)

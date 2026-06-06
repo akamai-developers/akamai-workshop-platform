@@ -1,0 +1,121 @@
+# Parametric in-cluster capacity test. Ramps concurrency against the vllm Service
+# and reports students-per-replica at a p99 latency threshold. Generalizes the old
+# load-test job. Labeled app=capacity-test so the default-deny NetworkPolicy lets it
+# reach vllm:8000. The wrapper (scripts/capacity-test.sh) overrides env via kubectl.
+#
+# Profiles:
+#   generic  (default) — random short turns emulating agent chat (no external download)
+#   workshop           — clones $CONTENT_REPO and replays prompts from
+#                        capacity-prompts.txt (one prompt per line) if present, else falls
+#                        back to generic.
+#
+# Tunables (env): MODEL, BASE_URL, CONCURRENCY_LEVELS (space-separated), NUM_PROMPTS,
+#   P99_THRESHOLD_MS, INPUT_LEN, OUTPUT_LEN, PROFILE, CONTENT_REPO.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vllm-capacity-test
+  namespace: workshop
+  labels:
+    app: capacity-test
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: capacity-test
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: vllm/vllm-openai:v0.20.2
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              MODEL="${MODEL:-Qwen/Qwen3-8B-FP8}"
+              BASE_URL="${BASE_URL:-http://vllm:8000}"
+              LEVELS="${CONCURRENCY_LEVELS:-1 4 8 16 32 64}"
+              NUM_PROMPTS="${NUM_PROMPTS:-64}"
+              THRESH="${P99_THRESHOLD_MS:-10000}"
+              INPUT_LEN="${INPUT_LEN:-512}"
+              OUTPUT_LEN="${OUTPUT_LEN:-256}"
+              PROFILE="${PROFILE:-generic}"
+
+              DATASET_ARGS=(--dataset-name random
+                            --random-input-len "${INPUT_LEN}"
+                            --random-output-len "${OUTPUT_LEN}")
+
+              if [ "${PROFILE}" = "workshop" ] && [ -n "${CONTENT_REPO:-}" ]; then
+                echo "[capacity-test] workshop profile: cloning ${CONTENT_REPO}"
+                if git clone --depth 1 "${CONTENT_REPO}" /tmp/content 2>/dev/null \
+                   && [ -f /tmp/content/capacity-prompts.txt ]; then
+                  python3 -c "import json; ls=[l.strip() for l in open('/tmp/content/capacity-prompts.txt') if l.strip()]; json.dump([{'prompt':l} for l in ls], open('/tmp/prompts.json','w')); print(f'[capacity-test] loaded {len(ls)} workshop prompts')"
+                  DATASET_ARGS=(--dataset-name custom --dataset-path /tmp/prompts.json)
+                else
+                  echo "[capacity-test] no capacity-prompts.txt in repo; using generic profile"
+                fi
+              fi
+
+              echo "=== capacity test: model=${MODEL} profile=${PROFILE} levels='${LEVELS}' p99<=${THRESH}ms ==="
+              RESULTS=""
+              BEST=0
+              for C in ${LEVELS}; do
+                echo ""
+                echo "--- concurrency=${C} (${NUM_PROMPTS} prompts) ---"
+                OUT="/tmp/c${C}"
+                mkdir -p "${OUT}"
+                vllm bench serve \
+                  --backend openai-chat \
+                  --base-url "${BASE_URL}" \
+                  --endpoint /v1/chat/completions \
+                  --model "${MODEL}" \
+                  "${DATASET_ARGS[@]}" \
+                  --num-prompts "${NUM_PROMPTS}" \
+                  --request-rate inf \
+                  --max-concurrency "${C}" \
+                  --percentile-metrics ttft,tpot,e2el \
+                  --metric-percentiles 50,99 \
+                  --save-result --result-dir "${OUT}" >/dev/null 2>&1
+                RES=$(ls "${OUT}"/*.json 2>/dev/null | head -1)
+                if [ -z "${RES}" ]; then
+                  echo "  (no result; vLLM may be unreachable) — stopping ramp"
+                  break
+                fi
+                LINE=$(python3 -c "import json; d=json.load(open('${RES}')); p50=d.get('p50_e2el_ms') or d.get('median_e2el_ms') or 0.0; p99=d.get('p99_e2el_ms') or 0.0; tput=d.get('output_throughput') or d.get('total_token_throughput') or 0.0; ok='OK' if p99<=${THRESH} else 'OVER'; print(f'${C}\t{p50:.0f}\t{p99:.0f}\t{tput:.1f}\t{ok}')")
+                echo "  p50=$(echo "$LINE"|cut -f2)ms p99=$(echo "$LINE"|cut -f3)ms tok/s=$(echo "$LINE"|cut -f4) [$(echo "$LINE"|cut -f5)]"
+                RESULTS="${RESULTS}${LINE}\n"
+                STATUS=$(echo "$LINE"|cut -f5)
+                if [ "${STATUS}" = "OK" ]; then BEST="${C}"; else
+                  echo "  p99 over threshold — stopping ramp"; break
+                fi
+              done
+
+              echo ""
+              echo "=== capacity-test summary (p99 threshold ${THRESH}ms) ==="
+              printf "conc\tp50ms\tp99ms\ttok/s\tstatus\n"
+              printf "${RESULTS}"
+              # students-per-replica: max concurrency under threshold = active slots;
+              # enrolled ≈ 2.5× active (students think between agent turns).
+              ENROLLED=$(python3 -c "print(int(${BEST}*2.5))")
+              echo ""
+              echo "CAPACITY_RESULT active_per_replica=${BEST} enrolled_per_replica=${ENROLLED} model=${MODEL} profile=${PROFILE}"
+          env:
+            - name: MODEL
+              value: "Qwen/Qwen3-8B-FP8"
+            - name: CONCURRENCY_LEVELS
+              value: "1 4 8 16 32 64"
+            - name: NUM_PROMPTS
+              value: "64"
+            - name: P99_THRESHOLD_MS
+              value: "10000"
+            - name: PROFILE
+              value: "generic"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

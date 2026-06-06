@@ -1,0 +1,31 @@
+# akamai-workshop-platform — example config.
+# Copy to config.yaml and run:  ./deploy.sh --yes --config config.yaml
+# The Linode token is NOT here — export it instead:  export TF_VAR_token=...
+# Anything you omit is filled by the wizard's autopilot. Flags override these.
+
+# --- The 5 questions ---
+students:     80
+model:        Qwen/Qwen3-8B-FP8     # ungated only; see `infra/scripts/sizing.py catalog`
+content_repo: ""                     # "" → default github.com/akamai-developers/ai-agents-workshop
+domain:       ""                     # "" → sslip.io + self-signed TLS; else Linode DNS + Let's Encrypt
+region:       us-ord                 # "" → wizard lists live GPU regions (see `infra/scripts/regions.sh list`)
+
+# --- Optional overrides (autopilot fills these from students + model) ---
+# gpu_node_type:        g2-gpu-rtx4000a4-s
+# gpu_node_count:       5
+# tensor_parallel_size: 4
+# cpu_node_type:        g6-dedicated-8
+# cpu_node_count:       5
+# max_model_len:        32768
+# gpu_memory_util:      0.9
+
+# --- Domain mode only ---
+# subdomain_prefix: workshop
+# cert_email:       you@example.com
+
+# --- Advanced ---
+# namespace:       workshop
+# label:           ai-agents-workshop   # deployment name → Linode cluster label (or pass --name)
+# k8s_version:     "1.34"
+# allowed_cidr:    0.0.0.0/0          # restrict ingress to a classroom CIDR
+# workspace_image: codercom/code-server:latest   # stock image + startup.sh ConfigMap (no Docker)

@@ -1,0 +1,26 @@
+# Copy to terraform.tfvars and fill in. Do not commit terraform.tfvars.
+# The wizard (deploy.sh) writes this file for you; this is the manual reference.
+
+token = "your-linode-api-token"
+
+# --- Cluster ---
+# region        = "us-ord"      # "" in the wizard → pick from the live GPU-region list
+# k8s_version   = "1.34"
+# label         = "ai-agents-workshop"
+
+# --- Node pools (sized by the wizard from student count + model) ---
+# cpu_node_type  = "g6-dedicated-8"
+# cpu_node_count = 5
+# gpu_node_type  = "g2-gpu-rtx4000a4-s"   # 4-GPU node → --tensor-parallel-size=4
+# gpu_node_count = 5
+
+# --- Domain (optional) ---
+# Empty domain = no-domain mode: sslip.io hostnames + self-signed wildcard TLS.
+# Set it to opt into Linode DNS + Let's Encrypt (token then also needs Domains: R/W).
+# domain           = ""
+# subdomain_prefix = "workshop"
+# cert_email       = "you@example.com"   # domain mode only
+
+# --- Networking ---
+# Restrict ingress to a specific CIDR (e.g. classroom NAT) instead of open internet.
+# allowed_cidr = "0.0.0.0/0"

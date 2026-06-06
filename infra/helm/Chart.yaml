@@ -1,0 +1,10 @@
+apiVersion: v2
+name: akamai-workshop-platform
+description: >-
+  Shared per-classroom cluster resources for akamai-workshop-platform — the
+  workshop namespace, the vLLM inference StatefulSet + Service, the default-deny
+  NetworkPolicy set, and the optional HF token Secret. Per-student workspaces are
+  rendered separately by infra/scripts/generate-pods.sh (idempotent passwords).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

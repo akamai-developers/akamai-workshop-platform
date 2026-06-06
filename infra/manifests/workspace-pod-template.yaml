@@ -1,0 +1,82 @@
+# Template for student workspace pods.
+# Used by generate-pods.sh — do not apply directly.
+# Per-student placeholders (sed): STUDENT_NUM, STUDENT_NUM_PADDED, PASSWORD_SECRET_NAME
+# Classroom-wide sentinels (sed): __NAMESPACE__, __WORKSPACE_IMAGE__, __VLLM_HOST__,
+#   __MODEL__, __CONTENT_REPO__  (filled from generate-pods.sh flags / helm values)
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ws-STUDENT_NUM_PADDED
+  namespace: __NAMESPACE__
+  labels:
+    app: workspace
+    student: "STUDENT_NUM"
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: code-server
+      image: __WORKSPACE_IMAGE__
+      # Run the clone-at-startup script mounted from the workspace-startup ConfigMap.
+      # This makes the stock codercom/code-server image behave like the prebuilt one
+      # (clones $CONTENT_REPO, best-effort pip install, then starts code-server) with
+      # no baked content and no Docker build required.
+      command: ["/bin/bash", "/workshop-scripts/startup.sh"]
+      ports:
+        - containerPort: 8080
+          name: http
+      env:
+        - name: PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: PASSWORD_SECRET_NAME
+              key: password
+        - name: VLLM_HOST
+          value: "__VLLM_HOST__"
+        - name: MODEL_NAME
+          value: "__MODEL__"
+        - name: CONTENT_REPO
+          value: "__CONTENT_REPO__"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "500Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: startup
+          mountPath: /workshop-scripts
+          readOnly: true
+  volumes:
+    - name: startup
+      configMap:
+        name: workspace-startup
+  restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-STUDENT_NUM_PADDED
+  namespace: __NAMESPACE__
+  labels:
+    app: workspace
+    student: "STUDENT_NUM"
+spec:
+  type: ClusterIP
+  selector:
+    app: workspace
+    student: "STUDENT_NUM"
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP

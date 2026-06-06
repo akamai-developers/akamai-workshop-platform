@@ -1,0 +1,42 @@
+# akamai-workshop-platform — shared cluster resource values.
+# The wizard (deploy.sh) writes an overrides file from the sizing calculator;
+# these defaults match the repo's reference 80-student / Qwen3-8B-FP8 plan.
+#
+# Flat top-level names match PLATFORM-PLAN.md §6 so they're easy to --set:
+#   helm template infra/helm --set model=Qwen/Qwen3-4B-Instruct-2507 --set tensor_parallel_size=1
+
+# --- Identity ---
+namespace: workshop
+student_count: 80
+
+# --- vLLM inference ---
+image: vllm/vllm-openai:v0.20.2
+model: Qwen/Qwen3-8B-FP8
+replicas: 5
+# Tensor parallelism MUST equal the GPU count of the chosen node plan; it also
+# drives the nvidia.com/gpu request/limit (each replica claims this many GPUs).
+tensor_parallel_size: 4
+max_model_len: 32768
+gpu_memory_util: 0.9
+
+# Less-often-changed vLLM knobs
+download_dir: /models
+model_cache_size: 50Gi
+shm_size: 8Gi
+vllm_cpu_request: "4"
+vllm_mem_request: 16Gi
+# Appended verbatim to the vLLM args (model-specific parsers, etc.)
+vllm_extra_args:
+  - --reasoning-parser=deepseek_r1
+  - --enable-auto-tool-choice
+  - --tool-call-parser=hermes
+
+# Optional HuggingFace token. Empty is correct for the ungated default models;
+# only gated models need it. Rendered into the vllm-secrets Secret.
+hf_token: ""
+
+# --- Per-student workspaces (consumed by generate-pods.sh, surfaced here so all
+#     classroom values live in one place) ---
+workspace_image: ghcr.io/akamai-developers/ai-agents-workspace:latest
+vllm_host: http://vllm:8000/v1
+content_repo: ""   # "" → default ai-agents-workshop (resolved by startup.sh)

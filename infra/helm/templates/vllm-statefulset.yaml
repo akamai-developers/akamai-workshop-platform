@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: vllm
+spec:
+  serviceName: vllm
+  replicas: {{ .Values.replicas }}
+  podManagementPolicy: Parallel
+  # Tensor parallelism (--tensor-parallel-size) must equal the GPU count of the
+  # node plan. Each replica loads the model once across those GPUs; remaining VRAM
+  # is pooled as a large shared KV cache.
+  selector:
+    matchLabels:
+      app: vllm
+  volumeClaimTemplates:
+    - metadata:
+        name: model-cache
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {{ .Values.model_cache_size }}
+        storageClassName: linode-block-storage
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      enableServiceLinks: false
+      nodeSelector:
+        pool: gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values: [vllm]
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: vllm
+          image: {{ .Values.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - --model={{ .Values.model }}
+            - --download-dir={{ .Values.download_dir }}
+            - --tensor-parallel-size={{ .Values.tensor_parallel_size }}
+            - --gpu-memory-utilization={{ .Values.gpu_memory_util }}
+            - --max-model-len={{ .Values.max_model_len }}
+            {{- range .Values.vllm_extra_args }}
+            - {{ . | quote }}
+            {{- end }}
+            - --host=0.0.0.0
+            - --port=8000
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-secrets
+                  key: HUGGING_FACE_HUB_TOKEN
+                  optional: true
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            requests:
+              cpu: {{ .Values.vllm_cpu_request | quote }}
+              memory: {{ .Values.vllm_mem_request | quote }}
+              nvidia.com/gpu: {{ .Values.tensor_parallel_size }}
+            limits:
+              nvidia.com/gpu: {{ .Values.tensor_parallel_size }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ .Values.download_dir }}
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shm_size }}

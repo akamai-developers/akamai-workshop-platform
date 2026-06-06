@@ -1,0 +1,54 @@
+# Default-deny ingress for the workshop namespace.
+# Pods accept nothing unless an explicit allow rule below opens a port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Allow the ingress controller to reach workspaces on 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-workspaces
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: workspace
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Allow only workspaces (and the load/capacity test) in this namespace to reach
+# vLLM on 8000. Student pods cannot reach each other; everything else is denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workspaces-to-vllm
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: vllm
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: workspace
+        - podSelector:
+            matchLabels:
+              app: capacity-test
+      ports:
+        - protocol: TCP
+          port: 8000
