@@ -20,7 +20,9 @@ You do not need a HuggingFace token, because the model menu is ungated only. You
 
 ## Architecture
 
-![akamai-workshop-platform architecture](infra/docs/architecture.png)
+<p align="center">
+  <img src="infra/docs/architecture.png" alt="akamai-workshop-platform architecture" width="400">
+</p>
 
 ## What it does
 
