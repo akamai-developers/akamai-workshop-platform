@@ -31,7 +31,7 @@ You do not need a HuggingFace token, because the model menu is ungated only. You
 - **Content-agnostic:** the platform clones your `content_repo` into each workspace at pod startup, with no image rebuild and no registry login. See [`examples/README.md`](examples/README.md).
 - **Domain-optional:** with no domain, the platform uses `sslip.io` hostnames and self-signed TLS (the default). With a domain, it uses Linode DNS and a Let's Encrypt wildcard certificate.
 - **Live region and capacity check:** the wizard discovers GPU-capable regions and validates GPU capacity before provisioning, so a capacity shortage never leaves a partially built cluster that keeps billing.
-- **Private inference:** vLLM stays cluster-internal behind a ClusterIP service and a default-deny NetworkPolicy. Off-cluster access uses `kubectl port-forward` only, with no public endpoint.
+- **Private inference:** vLLM and the multi-model agentgateway stay cluster-internal behind ClusterIP services and a default-deny NetworkPolicy. Off-cluster access uses `kubectl port-forward` only, with no public endpoint. Multi-model deployments also require an API key on the gateway.
 
 ## Quick start
 
@@ -72,8 +72,8 @@ For non-interactive runs (CI or scripted), copy `config.example.yaml` to `config
 
 Run `make help` to list every front-door target.
 
->!!!warning
->GPU nodes bill by the hour. Always run `make teardown` (or `./deploy.sh teardown`) when class ends, so the cluster stops billing.
+!!! warning
+    GPU nodes bill by the hour. Always run `make teardown` (or `./deploy.sh teardown`) when class ends, so the cluster stops billing.
 
 ## Inputs
 
@@ -82,8 +82,8 @@ These five inputs are the entire user surface. Anything you omit is filled by th
 | Input | Default | Meaning |
 |---|---|---|
 | `students` | required | Number of student workspaces to create |
-| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id. Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
-| `content_repo` | `ai-agents-workshop` | Git repo cloned into each workspace at startup |
+| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id, or comma-separated ids for multi-model (e.g. `"Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"`). Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
+| `content_repo` | `""` | Git repo cloned into each workspace at startup. Blank uses `akamai-developers/ai-agents-workshop`. Also accepts a full git URL, `owner/repo`, or a bare repo name. |
 | `domain` | `""` (no domain) | Empty uses `sslip.io` and self-signed TLS. A value uses Linode DNS and Let's Encrypt. |
 | `region` | nearest GPU region | Chosen from the live list of GPU-capable Akamai regions |
 
@@ -100,8 +100,42 @@ If you deploy without a domain (the default), the platform uses [sslip.io](https
 
 Because you do not control the `sslip.io` DNS zone, the platform cannot complete a Let's Encrypt DNS-01 challenge. It falls back to a self-signed certificate instead. The connection is still encrypted, but browsers show a "Not Secure" warning. Students accept the warning once and proceed normally.
 
->!note
->For production or customer-facing workshops, use a real domain. For internal testing or instructor-led sessions where you can walk students through the browser warning, sslip.io works fine.
+!!! note
+    For production or customer-facing workshops, use a real domain. For internal testing or instructor-led sessions where you can walk students through the browser warning, sslip.io works fine.
+
+## Multi-model deployments
+
+The platform can deploy two or more models behind a single endpoint. When you select multiple models (comma-separated), the platform provisions independent GPU node pools per model and deploys [agentgateway](https://agentgateway.dev) as a lightweight routing proxy. Students use one `VLLM_HOST` and select the model with the standard `model` field in their API requests, with no code changes.
+
+```bash
+# Dry-run: see per-model GPU breakdown, gateway routing, and total cost
+./deploy.sh --dry-run --students 40 --model "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
+
+# Deploy with multiple models
+./deploy.sh --students 40 --model "Qwen/Qwen3-8B-FP8,deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+```
+
+In `config.yaml`, use the `models:` key instead of `model:`:
+
+```yaml
+models: "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
+```
+
+Single-model deployments are unchanged: no gateway is deployed, and `VLLM_HOST` points directly to vLLM. Multi-model adds an agentgateway Deployment that reads the `model` field from the JSON request body and routes to the correct `vllm-<slug>:8000` backend. See [`infra/docs/architecture.md`](infra/docs/architecture.md) for the routing diagram.
+
+### API-key authentication
+
+Multi-model deployments require an API key, because students share one gateway. The platform mints a key at deploy time, stores it in the `gateway-api-keys` Secret (agentgateway `apiKeyAuthentication`, mode `Strict`), and injects it into every workspace as `VLLM_API_KEY`. Clients send it as `Authorization: Bearer`, so students do nothing. The key is printed in the "Classroom ready" summary.
+
+The gateway routes requests; it does not act as a passthrough, so it does not serve `GET /v1/models`. List the available models in one of two ways:
+
+```bash
+echo $MODEL_NAMES                              # inside a workspace
+kubectl -n workshop get agentgatewaybackends   # from the cluster
+```
+
+!!! note
+    The workshop uses a single shared key, which is fine for a time-boxed class. For production, issue one key per identity and add key rotation.
 
 ## Cost
 

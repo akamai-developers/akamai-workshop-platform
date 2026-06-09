@@ -46,6 +46,22 @@ variable "gpu_node_count" {
   default     = 5
 }
 
+variable "multi_model" {
+  description = "Enable multi-model mode with per-model GPU pools and agentgateway routing."
+  type        = bool
+  default     = false
+}
+
+variable "gpu_pools" {
+  description = "Per-model GPU pool definitions (multi-model mode only). Each entry creates a separate node pool with a distinct label for nodeSelector-based scheduling."
+  type = list(object({
+    type  = string
+    count = number
+    label = string
+  }))
+  default = []
+}
+
 variable "allowed_cidr" {
   description = "CIDR allowed to reach the workshop ingress on 80/443. Default is open; set to a CIDR (e.g. classroom IP) to restrict."
   type        = string

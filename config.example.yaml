@@ -6,6 +6,7 @@
 # --- The 5 questions ---
 students:     80
 model:        Qwen/Qwen3-8B-FP8     # ungated only; see `infra/scripts/sizing.py catalog`
+# models:     "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"  # multi-model: comma-separated, deploys agentgateway
 content_repo: ""                     # "" → default github.com/akamai-developers/ai-agents-workshop
 domain:       ""                     # "" → sslip.io + self-signed TLS; else Linode DNS + Let's Encrypt
 region:       us-ord                 # "" → wizard lists live GPU regions (see `infra/scripts/regions.sh list`)

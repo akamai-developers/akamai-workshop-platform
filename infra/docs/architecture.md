@@ -63,9 +63,75 @@ models only) and the workspace knobs (`workspace_image`, `vllm_host`, `content_r
 > **Invariant:** `tensor_parallel_size` must equal the GPU count of the chosen GPU node
 > plan. It drives both `--tensor-parallel-size` and the pod's `nvidia.com/gpu` request.
 
+## Multi-model architecture
+
+When the wizard receives two or more models (comma-separated `--model` or `models:`
+in config.yaml), the platform switches to multi-model mode. The key differences:
+
+- **Per-model GPU node pools**: Terraform creates a separate LKE node pool per model,
+  each with its own label (e.g. `pool=gpu-qwen-qwen3-8b-fp8`).
+- **Per-model vLLM StatefulSets**: the Helm chart renders one StatefulSet and ClusterIP
+  Service per model (e.g. `vllm-qwen-qwen3-8b-fp8`, `vllm-qwen-qwen3-14b-fp8`), each
+  pinned to its GPU pool via `nodeSelector`.
+- **Agentgateway routing proxy**: a lightweight Rust gateway reads the `model` field
+  from the JSON request body and routes to the correct vLLM backend. Students see a
+  single `VLLM_HOST` (`http://agentgateway:8080/v1`).
+
+```
+Students (browser)
+    │
+    ▼  HTTPS (sNN.<base-host>)
+Ingress-nginx
+    │
+    ▼
+ws-01..ws-N (code-server pods, CPU pool)
+    │
+    ▼  http://agentgateway:8080/v1 (single endpoint)
+Agentgateway (content-based routing on "model" field)
+    │
+    ├──► vllm-qwen3-8b:8000       (GPU pool 1, label pool=gpu-qwen-qwen3-8b-fp8)
+    └──► vllm-qwen3-14b:8000      (GPU pool 2, label pool=gpu-qwen-qwen3-14b-fp8)
+```
+
+Single-model deployments skip the gateway entirely — `VLLM_HOST` points directly to
+`vllm:8000` and the cluster layout is identical to the single-model diagram above.
+
+### Multi-model Helm values
+
+```yaml
+multi_model: true
+models:
+  - name: "Qwen/Qwen3-8B-FP8"
+    slug: "qwen-qwen3-8b-fp8"
+    replicas: 1
+    tensor_parallel_size: 2
+    gpu_pool_label: "gpu-qwen-qwen3-8b-fp8"
+  - name: "Qwen/Qwen3-14B-FP8"
+    slug: "qwen-qwen3-14b-fp8"
+    replicas: 1
+    tensor_parallel_size: 2
+    gpu_pool_label: "gpu-qwen-qwen3-14b-fp8"
+```
+
+### Multi-model Terraform variables
+
+```hcl
+multi_model = true
+gpu_pools = [
+  { type = "g2-gpu-rtx4000a2-s", count = 1, label = "gpu-qwen-qwen3-8b-fp8" },
+  { type = "g2-gpu-rtx4000a2-s", count = 1, label = "gpu-qwen-qwen3-14b-fp8" },
+]
+```
+
 ## Inference is private by design
 
 The vLLM Service is `ClusterIP`. A default-deny NetworkPolicy plus an explicit
-`allow-workspaces-to-vllm` rule means only workspace (and capacity-test) pods can reach
-`vllm:8000`. There is no ingress route to vLLM and no API key. Off-cluster access is
-`kubectl port-forward` only — see `quickstart.md` (added in a later phase).
+`allow-workspaces-to-vllm` rule (or `allow-workspaces-to-gateway` in multi-model) means
+only workspace (and capacity-test) pods can reach inference. There is no ingress route to
+vLLM. Single-model deployments rely on this network isolation alone (no API key).
+Multi-model deployments add API-key auth on the agentgateway (`apiKeyAuthentication`,
+mode `Strict`): the key lives in the `gateway-api-keys` Secret and is injected into every
+workspace as `VLLM_API_KEY`, which clients send as `Authorization: Bearer`. The gateway is
+a router, not a passthrough — it does not serve `GET /v1/models`; list models with
+`echo $MODEL_NAMES` in a workspace or `kubectl -n workshop get agentgatewaybackends`.
+Off-cluster access is `kubectl port-forward` only — see `quickstart.md`.

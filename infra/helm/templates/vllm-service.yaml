@@ -1,3 +1,4 @@
+{{- if not .Values.multi_model }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,3 +15,26 @@ spec:
       targetPort: 8000
       protocol: TCP
       name: http
+{{- else }}
+{{- range .Values.models }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-{{ .slug }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    app: vllm
+    model: {{ .slug }}
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm
+    model: {{ .slug }}
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+{{- end }}
+{{- end }}

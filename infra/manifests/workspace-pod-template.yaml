@@ -35,8 +35,12 @@ spec:
           value: "__VLLM_HOST__"
         - name: MODEL_NAME
           value: "__MODEL__"
+        - name: MODEL_NAMES
+          value: "__MODEL_NAMES__"
         - name: CONTENT_REPO
           value: "__CONTENT_REPO__"
+        - name: VLLM_API_KEY
+          value: "__VLLM_API_KEY__"
       resources:
         requests:
           cpu: "250m"
