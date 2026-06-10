@@ -13,31 +13,95 @@
 # the pod env; code-server reads $PASSWORD itself.
 set -uo pipefail
 
-CONTENT_REPO="${CONTENT_REPO:-}"
-[ -z "${CONTENT_REPO}" ] && CONTENT_REPO="https://github.com/akamai-developers/ai-agents-workshop.git"
+CONTENT_REPO_RAW="${CONTENT_REPO:-}"
 CONTENT_REF="${CONTENT_REF:-main}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${HOME:-/home/coder}/workshop}"
 BIND_ADDR="${BIND_ADDR:-0.0.0.0:8080}"
 
+DEFAULT_ORG="akamai-developers"
+DEFAULT_REPO="ai-agents-workshop"
+
 log() { echo "[startup] $*"; }
 
-# --- 1. Clone the content repo (idempotent across pod restarts) ---------------
-if command -v git >/dev/null 2>&1; then
-  if [ -e "${WORKSPACE_DIR}/.git" ]; then
-    log "content already present at ${WORKSPACE_DIR}; skipping clone"
+# Coerce whatever CONTENT_REPO shape we were handed into a clonable git URL.
+# Accepts: "" (→ the default workshop), a full URL (https/ssh/scp — used as-is), an
+# "owner/repo" shorthand, or a bare repo name (→ the default org). Without this, the
+# deploy wizard's old bare-name default ("ai-agents-workshop") was fed straight to
+# `git remote add`, which is not a URL, so every workspace started empty.
+normalize_repo() {
+  local r="${1:-}"
+  r="${r%/}"                                                  # drop a trailing slash
+  if [ -z "${r}" ]; then
+    printf 'https://github.com/%s/%s.git' "${DEFAULT_ORG}" "${DEFAULT_REPO}"
+  elif printf '%s' "${r}" | grep -qE '://|^git@'; then
+    printf '%s' "${r}"                                         # already a full URL
+  elif printf '%s' "${r}" | grep -qE '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+    printf 'https://github.com/%s.git' "${r%.git}"            # owner/repo shorthand
   else
-    log "cloning ${CONTENT_REPO}#${CONTENT_REF} → ${WORKSPACE_DIR}"
-    mkdir -p "${WORKSPACE_DIR}"
-    if ! ( cd "${WORKSPACE_DIR}" \
+    printf 'https://github.com/%s/%s.git' "${DEFAULT_ORG}" "${r%.git}"  # bare name → default org
+  fi
+}
+
+CONTENT_REPO="$(normalize_repo "${CONTENT_REPO_RAW}")"
+
+# --- 1. Clone the content repo (idempotent + atomic across pod restarts) -------
+# "Present" means a *resolvable HEAD*, not merely a .git directory: a failed
+# `git init`+fetch leaves a bare .git behind, and keying off that would wedge the
+# workspace empty forever. We clone into a temp dir and only swap it into place on
+# full success, so a failed clone leaves nothing and the next pod start retries.
+content_present() { git -C "${WORKSPACE_DIR}" rev-parse --verify HEAD >/dev/null 2>&1; }
+
+clone_content() {
+  local tmp="${WORKSPACE_DIR}.cloning"
+  rm -rf "${tmp}"
+  mkdir -p "${tmp}"
+  if ( cd "${tmp}" \
         && git init -q \
         && git remote add origin "${CONTENT_REPO}" \
         && git fetch --depth=1 origin "${CONTENT_REF}" \
         && git checkout -q FETCH_HEAD ); then
-      log "WARN: clone failed; starting code-server with an empty workspace"
+    if [ -d "${WORKSPACE_DIR}" ]; then
+      rm -rf "${WORKSPACE_DIR}/.git"                          # clear any stale/partial .git first
+      shopt -s dotglob
+      mv "${tmp}"/* "${WORKSPACE_DIR}"/ 2>/dev/null || true   # merge into an existing dir
+      shopt -u dotglob
+      rm -rf "${tmp}"
+    else
+      mv "${tmp}" "${WORKSPACE_DIR}"                          # atomic rename (fresh pod)
+    fi
+    return 0
+  fi
+  rm -rf "${tmp}"                                             # leave no partial .git behind
+  return 1
+}
+
+if command -v git >/dev/null 2>&1; then
+  if content_present; then
+    log "content already present at ${WORKSPACE_DIR}; skipping clone"
+  else
+    log "cloning ${CONTENT_REPO}#${CONTENT_REF} → ${WORKSPACE_DIR}"
+    if clone_content; then
+      log "content cloned into ${WORKSPACE_DIR}"
+    else
+      log "WARN: clone of ${CONTENT_REPO}#${CONTENT_REF} failed; starting code-server with an empty workspace"
+      mkdir -p "${WORKSPACE_DIR}"
+      cat > "${WORKSPACE_DIR}/WORKSHOP-NOT-LOADED.md" << EOF
+# Workshop content did not load
+
+The platform tried to clone the workshop content but the clone failed, so this
+workspace is empty.
+
+- Repo tried:  ${CONTENT_REPO}
+- Ref:         ${CONTENT_REF}
+
+Likely causes: the repo is private (no credentials are injected into workspaces),
+the owner/URL is wrong, or the ref does not exist. Fix \`content_repo\` and recreate
+the workspace pods. See infra/docs/troubleshooting.md.
+EOF
     fi
   fi
 else
-  log "WARN: git not found; cannot clone content; starting code-server anyway"
+  log "WARN: git not found in this image; cannot clone content; starting code-server anyway"
   mkdir -p "${WORKSPACE_DIR}"
 fi
 
@@ -98,4 +162,5 @@ fi
 log "starting code-server on ${BIND_ADDR} (workspace: ${WORKSPACE_DIR})"
 if [ -n "${VLLM_HOST:-}" ]; then log "VLLM_HOST=${VLLM_HOST}"; fi
 if [ -n "${MODEL_NAME:-}" ]; then log "MODEL_NAME=${MODEL_NAME}"; fi
+if [ -n "${MODEL_NAMES:-}" ]; then log "MODEL_NAMES=${MODEL_NAMES}"; fi
 exec code-server --bind-addr "${BIND_ADDR}" --auth password "${WORKSPACE_DIR}"

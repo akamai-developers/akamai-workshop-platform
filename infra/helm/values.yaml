@@ -25,15 +25,36 @@ model_cache_size: 50Gi
 shm_size: 8Gi
 vllm_cpu_request: "4"
 vllm_mem_request: 16Gi
-# Appended verbatim to the vLLM args (model-specific parsers, etc.)
+# Appended verbatim to the vLLM args. Set by deploy.sh based on the selected model.
+# Do NOT hardcode model-specific flags here (e.g. --reasoning-parser) since they
+# vary by model and will crash incompatible models.
 vllm_extra_args:
-  - --reasoning-parser=deepseek_r1
   - --enable-auto-tool-choice
   - --tool-call-parser=hermes
 
 # Optional HuggingFace token. Empty is correct for the ungated default models;
 # only gated models need it. Rendered into the vllm-secrets Secret.
 hf_token: ""
+
+# --- Multi-model mode ---
+# When true, deploys per-model vLLM StatefulSets + agentgateway routing proxy.
+# When false (default), deploys a single vLLM StatefulSet (backward compatible).
+multi_model: false
+models: []
+# models example:
+#   - name: "Qwen/Qwen3-8B-FP8"
+#     slug: "qwen-qwen3-8b-fp8"
+#     replicas: 1
+#     tensor_parallel_size: 2
+#     gpu_pool_label: "gpu-qwen-qwen3-8b-fp8"
+
+# Agentgateway settings (multi-model only)
+agentgateway_image: "ghcr.io/agentgateway/agentgateway:latest"
+agentgateway_port: 8080
+# When set, the gateway requires `Authorization: Bearer <gateway_api_key>` on every
+# request (agentgateway apiKeyAuthentication, Strict). Workspaces get it as
+# VLLM_API_KEY. Empty → no auth (relies on ClusterIP + NetworkPolicy only).
+gateway_api_key: ""
 
 # --- Per-student workspaces (consumed by generate-pods.sh, surfaced here so all
 #     classroom values live in one place) ---

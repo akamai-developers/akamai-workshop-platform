@@ -41,6 +41,7 @@ try:
     json.dump(data, sys.stdout)
 except BrokenPipeError:
     pass
+import os; os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 PY
 }
 

@@ -33,3 +33,8 @@ output "base_host" {
   description = "Base host for student URLs: https://s01.<this>, s02.<this>, … In no-domain mode this is <lb-ip-dashed>.sslip.io; with a domain it is <prefix>.<domain>."
   value       = local.base_host
 }
+
+output "gpu_pool_labels" {
+  description = "Labels assigned to GPU node pools. Single-model: [\"gpu\"]. Multi-model: per-model labels."
+  value       = keys(local.effective_gpu_pools)
+}

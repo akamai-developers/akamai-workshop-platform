@@ -35,7 +35,10 @@ TFVARS_OUT="${TF_DIR}/terraform.tfvars"
 # ---------------------------------------------------------------------------
 STUDENTS=""
 MODEL=""
+MODELS=""
+MULTI_MODEL=0
 CONTENT_REPO=""
+GATEWAY_API_KEY=""
 DOMAIN=""
 REGION=""
 # Advanced / sizing overrides (autopilot fills these when left empty).
@@ -188,7 +191,8 @@ load_config() {
     assigns="$(python3 - "$1" <<'PY'
 import sys, re
 keys = {
- "students":"STUDENTS","model":"MODEL","content_repo":"CONTENT_REPO","domain":"DOMAIN",
+ "students":"STUDENTS","model":"MODEL","models":"MODELS",
+ "content_repo":"CONTENT_REPO","domain":"DOMAIN",
  "region":"REGION","gpu_node_type":"GPU_NODE_TYPE","gpu_node_count":"GPU_NODE_COUNT",
  "tensor_parallel_size":"TP","cpu_node_type":"CPU_NODE_TYPE","cpu_node_count":"CPU_NODE_COUNT",
  "label":"LABEL","k8s_version":"K8S_VERSION","subdomain_prefix":"SUBDOMAIN_PREFIX",
@@ -216,7 +220,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)            shift 2 ;;  # already handled
         --students)          STUDENTS="$2"; shift 2 ;;
-        --model)             MODEL="$2"; shift 2 ;;
+        --model|--models)    MODELS="$2"; shift 2 ;;
         --content-repo)      CONTENT_REPO="$2"; shift 2 ;;
         --domain)            DOMAIN="$2"; shift 2 ;;
         --region)            REGION="$2"; shift 2 ;;
@@ -257,6 +261,22 @@ interactive() { [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; }
 
 TOTAL_STEPS=6
 
+# Seed wizard defaults from the previous deployment. terraform.tfvars survives
+# teardown precisely so a re-deploy can offer the same answers back — without
+# this every fresh wizard falls back to hardcoded defaults, and a silently
+# renamed deployment can collide with whatever else lives in the account.
+# (Flags and --config still override; --yes runs stay on documented defaults.)
+_PREV_LABEL=""; _PREV_DOMAIN=""; _PREV_REGION=""
+if [[ -f "$TFVARS_OUT" ]]; then
+    _tfv() {
+        grep -E "^[[:space:]]*$1[[:space:]]*=" "$TFVARS_OUT" 2>/dev/null \
+            | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]*)".*/\1/p' || true
+    }
+    _PREV_LABEL="$(_tfv label)"
+    _PREV_DOMAIN="$(_tfv domain)"
+    _PREV_REGION="$(_tfv region)"
+fi
+
 # ---- Collect inputs (prompt only when interactive and unset) ----
 if interactive; then
     echo ""
@@ -267,7 +287,8 @@ if interactive; then
     # -- Step 1: Deployment name --
     if [[ -z "$LABEL" ]]; then
         step_header 1 $TOTAL_STEPS "Deployment name"
-        prompt_input "Name" "ai-agents-workshop" LABEL
+        [[ -n "$_PREV_LABEL" ]] && printf '%b\n' "        ${DIM}Default carried over from your last deploy${RESET}"
+        prompt_input "Name" "${_PREV_LABEL:-ai-agents-workshop}" LABEL
     else
         step_header 1 $TOTAL_STEPS "Deployment name"
         ok "pre-set: ${LABEL}"
@@ -284,27 +305,64 @@ if interactive; then
 
     # -- Step 3: Model selection --
     step_header 3 $TOTAL_STEPS "Model selection"
-    if [[ -z "$MODEL" ]]; then
-        printf '%b\n' "        ${DIM}Type 'list' to see the ungated model catalog${RESET}"
+    if [[ -z "$MODELS" && -z "$MODEL" ]]; then
+        # Get the formatted table and numbered catalog from sizing.py
+        _TABLE_OUTPUT="$(python3 "${SCRIPTS}/sizing.py" wizard-table)"
+        _DEFAULT_NUM="$(printf '%s\n' "$_TABLE_OUTPUT" | grep '^__DEFAULT__:' | cut -d: -f2)"
+        _DEFAULT_NUM="${_DEFAULT_NUM:-3}"
+        # Print the table (everything except the __DEFAULT__ line)
+        echo ""
+        printf '%s\n' "$_TABLE_OUTPUT" | grep -v '^__DEFAULT__:'
+        echo ""
+
+        # Numbered catalog for resolving picks
+        _CATALOG="$(python3 "${SCRIPTS}/sizing.py" numbered-catalog)"
+        _CATALOG_COUNT="$(printf '%s\n' "$_CATALOG" | wc -l | tr -d ' ')"
+
         while true; do
-            prompt_input "Model" "Qwen/Qwen3-8B-FP8" MODEL
-            case "$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')" in
-                '?'|l|ls|list)
-                    echo ""
-                    python3 "${SCRIPTS}/sizing.py" catalog
-                    echo ""
-                    MODEL="" ;;
-                *) break ;;
-            esac
+            printf '%b' "        ${BOLD}Select${RESET} ${DIM}[${_DEFAULT_NUM}]${RESET} "
+            read -r _PICK
+            _PICK="${_PICK:-${_DEFAULT_NUM}}"
+            _RESOLVED=""
+            _VALID=1
+            IFS=',' read -ra _NUMS <<< "$_PICK"
+            for _N in "${_NUMS[@]}"; do
+                _N="$(printf '%s' "$_N" | tr -d ' ')"
+                if ! [[ "$_N" =~ ^[0-9]+$ ]] || [[ "$_N" -lt 1 ]] || [[ "$_N" -gt "$_CATALOG_COUNT" ]]; then
+                    printf '%b\n' "        ${RED}Invalid: ${_N}. Enter 1-${_CATALOG_COUNT}.${RESET}"
+                    _VALID=0
+                    break
+                fi
+                _NAME="$(printf '%s\n' "$_CATALOG" | sed -n "${_N}p" | cut -f2)"
+                if [[ -n "$_RESOLVED" ]]; then
+                    _RESOLVED="${_RESOLVED},${_NAME}"
+                else
+                    _RESOLVED="${_NAME}"
+                fi
+            done
+            [[ "$_VALID" -eq 0 ]] && continue
+            MODELS="$_RESOLVED"
+            break
         done
-    else
+
+        if [[ "$MODELS" == *","* ]]; then
+            ok "$(echo "$MODELS" | tr ',' '\n' | wc -l | tr -d ' ') models selected"
+        else
+            ok "$MODELS"
+        fi
+    elif [[ -n "$MODELS" ]]; then
+        ok "pre-set: ${MODELS}"
+    elif [[ -n "$MODEL" ]]; then
+        MODELS="$MODEL"
         ok "pre-set: ${MODEL}"
     fi
 
     # -- Step 4: Workshop content --
     if [[ -z "$CONTENT_REPO" ]]; then
         step_header 4 $TOTAL_STEPS "Workshop content"
-        prompt_input "Content repo" "ai-agents-workshop" CONTENT_REPO
+        printf '%b\n' "        ${DIM}Blank = the default Akamai AI-agents workshop${RESET}"
+        printf '%b\n' "        ${DIM}Or enter a git URL or owner/repo to use your own${RESET}"
+        prompt_input "Content repo" "" CONTENT_REPO
     else
         step_header 4 $TOTAL_STEPS "Workshop content"
         ok "pre-set: ${CONTENT_REPO}"
@@ -313,10 +371,14 @@ if interactive; then
     # -- Step 5: Domain & TLS --
     step_header 5 $TOTAL_STEPS "Domain & TLS"
     if [[ -z "$DOMAIN" ]]; then
-        printf '%b\n' "        ${DIM}Leave blank for sslip.io + self-signed TLS${RESET}"
+        if [[ -n "$_PREV_DOMAIN" ]]; then
+            printf '%b\n' "        ${DIM}Default carried over from your last deploy; type 'none' for sslip.io + self-signed TLS${RESET}"
+        else
+            printf '%b\n' "        ${DIM}Leave blank for sslip.io + self-signed TLS${RESET}"
+        fi
         printf '%b\n' "        ${DIM}Type 'list' to see domains in your Linode account${RESET}"
         while true; do
-            prompt_input "Domain" "none" DOMAIN
+            prompt_input "Domain" "${_PREV_DOMAIN:-none}" DOMAIN
             case "$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')" in
                 '?'|l|ls|list)
                     _list_linode_domains
@@ -339,7 +401,7 @@ if interactive; then
         printf '%b\n' "        ${DIM}Discovering GPU-capable regions...${RESET}"
         echo ""
         "${SCRIPTS}/regions.sh" list 2>/dev/null || true
-        prompt_input "Region" "us-ord" REGION
+        prompt_input "Region" "${_PREV_REGION:-us-ord}" REGION
     else
         ok "pre-set: ${REGION}"
     fi
@@ -347,7 +409,25 @@ fi
 
 # ---- Defaults for anything still empty ----
 STUDENTS="${STUDENTS:-80}"
-MODEL="${MODEL:-Qwen/Qwen3-8B-FP8}"
+# Normalize: --model sets MODELS; legacy MODEL var is an alias.
+[[ -n "$MODEL" && -z "$MODELS" ]] && MODELS="$MODEL"
+MODELS="${MODELS:-Qwen/Qwen3-8B-FP8}"
+# Detect multi-model: if MODELS contains a comma, set MULTI_MODEL=1.
+if [[ "$MODELS" == *,* ]]; then
+    MULTI_MODEL=1
+    # Default MODEL_NAME stamped into workspaces: prefer the catalog default
+    # (Qwen3-8B — the model the workshop content is tuned for) when it's in the
+    # selected set, otherwise the first model. Avoids defaulting students onto a
+    # model that may need extra per-model tuning.
+    if [[ ",$MODELS," == *",Qwen/Qwen3-8B-FP8,"* ]]; then
+        MODEL="Qwen/Qwen3-8B-FP8"
+    else
+        MODEL="${MODELS%%,*}"
+    fi
+else
+    MULTI_MODEL=0
+    MODEL="$MODELS"
+fi
 REGION="${REGION:-us-ord}"
 
 # Sanitize the deployment name into a valid Linode label; fall back to the default.
@@ -364,16 +444,17 @@ case "$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')" in
 esac
 
 # ---- Sizing (autopilot + any explicit overrides) ----
-SIZING_ARGS=(plan --students "$STUDENTS" --model "$MODEL" --json)
-[[ -n "$GPU_NODE_TYPE" ]] && SIZING_ARGS+=(--gpu-node-type "$GPU_NODE_TYPE")
-[[ -n "$TP" ]]            && SIZING_ARGS+=(--tp "$TP")
-[[ -n "$CPU_NODE_TYPE" ]] && SIZING_ARGS+=(--cpu-node-type "$CPU_NODE_TYPE")
+if [[ $MULTI_MODEL -eq 0 ]]; then
+    # Single-model path: identical to original.
+    SIZING_ARGS=(plan --students "$STUDENTS" --model "$MODEL" --json)
+    [[ -n "$GPU_NODE_TYPE" ]] && SIZING_ARGS+=(--gpu-node-type "$GPU_NODE_TYPE")
+    [[ -n "$TP" ]]            && SIZING_ARGS+=(--tp "$TP")
+    [[ -n "$CPU_NODE_TYPE" ]] && SIZING_ARGS+=(--cpu-node-type "$CPU_NODE_TYPE")
 
-PLAN_JSON="$(python3 "${SCRIPTS}/sizing.py" "${SIZING_ARGS[@]}")" \
-    || err "sizing failed (see message above)"
+    PLAN_JSON="$(python3 "${SCRIPTS}/sizing.py" "${SIZING_ARGS[@]}")" \
+        || err "sizing failed (see message above)"
 
-# Pull the resolved plan back into shell vars.
-eval "$(python3 - <<PY
+    eval "$(python3 - <<PY
 import json
 p = json.loads('''$PLAN_JSON''')
 print(f'P_GPU_TYPE={p["gpu_node_type"]}')
@@ -387,14 +468,31 @@ print(f'P_GATED={int(p["gpu_gated"])}')
 PY
 )"
 
-# Explicit count overrides win over the formula (e.g. e2e pins gpu_node_count=1).
-GPU_NODE_TYPE="${GPU_NODE_TYPE:-$P_GPU_TYPE}"
-GPU_NODE_COUNT="${GPU_NODE_COUNT:-$P_GPU_COUNT}"
-TP="${TP:-$P_TP}"
-CPU_NODE_TYPE="${CPU_NODE_TYPE:-$P_CPU_TYPE}"
-CPU_NODE_COUNT="${CPU_NODE_COUNT:-$P_CPU_COUNT}"
-REPLICAS="$P_REPLICAS"
-[[ "$GPU_NODE_COUNT" != "$P_GPU_COUNT" ]] && REPLICAS="$GPU_NODE_COUNT"
+    GPU_NODE_TYPE="${GPU_NODE_TYPE:-$P_GPU_TYPE}"
+    GPU_NODE_COUNT="${GPU_NODE_COUNT:-$P_GPU_COUNT}"
+    TP="${TP:-$P_TP}"
+    CPU_NODE_TYPE="${CPU_NODE_TYPE:-$P_CPU_TYPE}"
+    CPU_NODE_COUNT="${CPU_NODE_COUNT:-$P_CPU_COUNT}"
+    REPLICAS="$P_REPLICAS"
+    [[ "$GPU_NODE_COUNT" != "$P_GPU_COUNT" ]] && REPLICAS="$GPU_NODE_COUNT"
+else
+    # Multi-model path: call multi-plan, parse aggregate JSON.
+    PLAN_JSON="$(python3 "${SCRIPTS}/sizing.py" multi-plan \
+        --students "$STUDENTS" --models "$MODELS" --json)" \
+        || err "sizing failed (see message above)"
+
+    eval "$(python3 - <<PY
+import json
+p = json.loads('''$PLAN_JSON''')
+print(f'P_CPU_TYPE={p["cpu_node_type"]}')
+print(f'P_CPU_COUNT={p["cpu_node_count"]}')
+print(f'P_HOURLY={p["hourly_usd"]}')
+print(f'P_GATED=0')
+PY
+)"
+    CPU_NODE_TYPE="${CPU_NODE_TYPE:-$P_CPU_TYPE}"
+    CPU_NODE_COUNT="${CPU_NODE_COUNT:-$P_CPU_COUNT}"
+fi
 
 if [[ -z "$DOMAIN" ]]; then DOMAIN_MODE="sslip.io + self-signed TLS";
 else DOMAIN_MODE="${SUBDOMAIN_PREFIX}.${DOMAIN} (Linode DNS + Let's Encrypt)"; fi
@@ -405,21 +503,37 @@ rule
 printf '%b\n' "  ${BOLD}Deployment Plan${RESET}"
 rule
 echo ""
-python3 "${SCRIPTS}/sizing.py" plan --students "$STUDENTS" --model "$MODEL" \
-    ${GPU_NODE_TYPE:+--gpu-node-type "$GPU_NODE_TYPE"} ${TP:+--tp "$TP"} \
-    | sed 's/^/  /'
-echo ""
-rule
-echo ""
-printf "  ${DIM}%-14s${RESET} %s\n" "Name:"       "$LABEL"
-printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
-printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
-printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
-printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "${REPLICAS} replica(s), ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (TP=${TP})"
-printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
-printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
-echo ""
-[[ "$P_GATED" == "1" ]] && warn "${GPU_NODE_TYPE} is access-gated and may fail to provision."
+if [[ $MULTI_MODEL -eq 0 ]]; then
+    python3 "${SCRIPTS}/sizing.py" plan --students "$STUDENTS" --model "$MODEL" \
+        ${GPU_NODE_TYPE:+--gpu-node-type "$GPU_NODE_TYPE"} ${TP:+--tp "$TP"} \
+        | sed 's/^/  /'
+    echo ""
+    rule
+    echo ""
+    printf "  ${DIM}%-14s${RESET} %s\n" "Name:"       "$LABEL"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
+    printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "${REPLICAS} replica(s), ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (TP=${TP})"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
+    echo ""
+    [[ "$P_GATED" == "1" ]] && warn "${GPU_NODE_TYPE} is access-gated and may fail to provision."
+else
+    python3 "${SCRIPTS}/sizing.py" multi-plan --students "$STUDENTS" --models "$MODELS" \
+        | sed 's/^/  /'
+    echo ""
+    rule
+    echo ""
+    printf "  ${DIM}%-14s${RESET} %s\n" "Name:"       "$LABEL"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
+    printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Routing:"    "agentgateway → ${MODELS}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
+    echo ""
+fi
 
 # ---- Dry run stops here, writing nothing ----
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -447,8 +561,8 @@ if interactive; then
             s|S)
                 echo ""
                 printf '%b' "  ${BOLD}Students:${RESET} "; read -r STUDENTS
-                printf '%b' "  ${BOLD}Model:${RESET} "; read -r MODEL
-                exec "$0" deploy --students "$STUDENTS" --model "$MODEL" \
+                printf '%b' "  ${BOLD}Model(s):${RESET} "; read -r MODELS
+                exec "$0" deploy --students "$STUDENTS" --model "$MODELS" \
                      --label "$LABEL" --domain "$DOMAIN" --region "$REGION" \
                      ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} ;;
             t|T) "${SCRIPTS}/capacity-test.sh" --model "$MODEL" --region "$REGION" \
@@ -463,12 +577,18 @@ if interactive; then
 fi
 
 # ---- Token check (only now that we're really deploying) ----
-export TF_VAR_token="${TF_VAR_token:-${LINODE_TOKEN:-}}"
-[[ -n "$TF_VAR_token" ]] || err "set TF_VAR_token or LINODE_TOKEN before deploying."
+# $TF_VAR_token and $LINODE_TOKEN are interchangeable. Probe each (TF_VAR_token
+# first, quick /v4/profile GET) and deploy with the first one the API accepts,
+# so a stale token lingering in a shell profile can't shadow a good one — the
+# same contract issue-cert.sh / provision.sh / teardown.sh follow. Invalid
+# tokens still fail fast and clear here, not deep inside 'terraform apply'.
+[[ -n "${TF_VAR_token:-}${LINODE_TOKEN:-}" ]] || err "set TF_VAR_token or LINODE_TOKEN before deploying."
 
-# Validate the token now (a quick /v4/profile GET) so an invalid or expired token
-# fails fast and clear, instead of deep inside 'terraform apply'.
-TOKEN_HTTP="$(python3 - "$TF_VAR_token" <<'PY'
+_TOKEN_PICKED=""
+for _CAND_SRC in TF_VAR_token LINODE_TOKEN; do
+    _CAND="${!_CAND_SRC:-}"
+    [[ -n "$_CAND" ]] || continue
+    TOKEN_HTTP="$(python3 - "$_CAND" <<'PY'
 import sys, urllib.request, urllib.error
 req = urllib.request.Request("https://api.linode.com/v4/profile",
                              headers={"Authorization": "Bearer " + sys.argv[1]})
@@ -481,23 +601,74 @@ except Exception:
     print("")
 PY
 )"
-case "$TOKEN_HTTP" in
-    200) ok "Linode token valid" ;;
-    401|403) err "Linode token rejected (HTTP ${TOKEN_HTTP}). Check \$TF_VAR_token or \$LINODE_TOKEN; it may be invalid or expired." ;;
-    "")  warn "could not reach the Linode API to validate the token; continuing." ;;
-    *)   warn "unexpected response (HTTP ${TOKEN_HTTP}) validating the token; continuing." ;;
-esac
+    case "$TOKEN_HTTP" in
+        200) ok "Linode token valid (from \$${_CAND_SRC})"; _TOKEN_PICKED="$_CAND"; break ;;
+        401|403) warn "token from \$${_CAND_SRC} rejected (HTTP ${TOKEN_HTTP}); trying next source." ;;
+        "")  warn "could not reach the Linode API to validate the token; continuing with \$${_CAND_SRC}."
+             _TOKEN_PICKED="$_CAND"; break ;;
+        *)   warn "unexpected response (HTTP ${TOKEN_HTTP}) validating \$${_CAND_SRC}; continuing with it."
+             _TOKEN_PICKED="$_CAND"; break ;;
+    esac
+done
+[[ -n "$_TOKEN_PICKED" ]] || err "the Linode API rejected every token it was given (\$TF_VAR_token, \$LINODE_TOKEN). Recreate one at https://cloud.linode.com/profile/tokens — and if your shell profile exports a stale LINODE_TOKEN, update it."
+export TF_VAR_token="$_TOKEN_PICKED"
+
+# ---- Deployment-name preflight ----
+# LKE cluster and firewall labels are account-unique, and terraform 400s
+# mid-apply on a collision (e.g. an old demo cluster with the same name).
+# Catch it here with a clear fix — unless this directory's terraform state
+# already owns that label (a normal idempotent re-deploy).
+if ! grep -qs "\"label\": \"${LABEL}\"" "${TF_DIR}/terraform.tfstate"; then
+    _LABEL_CLASH="$(python3 - "$TF_VAR_token" "$LABEL" <<'PY'
+import json, sys, urllib.request
+token, label = sys.argv[1], sys.argv[2]
+def labels(url):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return [d["label"] for d in json.load(r).get("data", [])]
+    except Exception:
+        return []   # advisory check: on API trouble, let terraform be the judge
+out = []
+if label in labels("https://api.linode.com/v4/lke/clusters?page_size=500"):
+    out.append("LKE cluster")
+if f"{label}-ingress" in labels("https://api.linode.com/v4/networking/firewalls?page_size=500"):
+    out.append("cloud firewall")
+print(", ".join(out))
+PY
+)"
+    if [[ -n "$_LABEL_CLASH" ]]; then
+        err "deployment name '${LABEL}' already exists in your account (${_LABEL_CLASH}) and is not managed by this directory's terraform state. Pick a different name (--label <name> or the Name prompt), or tear down / rename the old resources at https://cloud.linode.com/kubernetes"
+    fi
+fi
 
 # ---- Capacity preflight (advisory; never strands a half-built cluster) ----
 echo ""
 rule
 printf '%b\n' "  ${BOLD}GPU capacity preflight${RESET}"
 rule
-"${SCRIPTS}/regions.sh" preflight "$GPU_NODE_TYPE" "$REGION" || true
+if [[ $MULTI_MODEL -eq 0 ]]; then
+    "${SCRIPTS}/regions.sh" preflight "$GPU_NODE_TYPE" "$REGION" || true
+else
+    # Check capacity for each model's GPU type.
+    python3 - <<PY | while IFS= read -r gpu_type; do
+import json
+p = json.loads('''$PLAN_JSON''')
+seen = set()
+for m in p["models"]:
+    t = m["gpu_node_type"]
+    if t not in seen:
+        seen.add(t)
+        print(t)
+PY
+        "${SCRIPTS}/regions.sh" preflight "$gpu_type" "$REGION" || true
+    done
+fi
 
 # ---- Write terraform.tfvars (token stays in the env, not the file) ----
 mkdir -p "$GEN_DIR"
-cat > "$TFVARS_OUT" <<EOF
+if [[ $MULTI_MODEL -eq 0 ]]; then
+    cat > "$TFVARS_OUT" <<EOF
 # Generated by deploy.sh — do not commit. Token comes from \$TF_VAR_token.
 region           = "${REGION}"
 k8s_version      = "${K8S_VERSION}"
@@ -511,10 +682,46 @@ subdomain_prefix = "${SUBDOMAIN_PREFIX}"
 cert_email       = "${CERT_EMAIL}"
 allowed_cidr     = "${ALLOWED_CIDR}"
 EOF
+else
+    # Multi-model: emit gpu_pools list from the multi-plan JSON.
+    GPU_POOLS_HCL="$(python3 - <<PY
+import json
+p = json.loads('''$PLAN_JSON''')
+lines = []
+for m in p["models"]:
+    lines.append('  { type = "%s", count = %d, label = "%s" }' % (
+        m["gpu_node_type"], m["gpu_node_count"], m["gpu_pool_label"]))
+print("[\n" + ",\n".join(lines) + "\n]")
+PY
+)"
+    cat > "$TFVARS_OUT" <<EOF
+# Generated by deploy.sh — do not commit. Token comes from \$TF_VAR_token.
+region           = "${REGION}"
+k8s_version      = "${K8S_VERSION}"
+label            = "${LABEL}"
+cpu_node_type    = "${CPU_NODE_TYPE}"
+cpu_node_count   = ${CPU_NODE_COUNT}
+multi_model      = true
+gpu_pools        = ${GPU_POOLS_HCL}
+domain           = "${DOMAIN}"
+subdomain_prefix = "${SUBDOMAIN_PREFIX}"
+cert_email       = "${CERT_EMAIL}"
+allowed_cidr     = "${ALLOWED_CIDR}"
+EOF
+fi
 ok "Wrote ${TFVARS_OUT}"
 
 # ---- Write Helm overrides (merged over infra/helm/values.yaml) ----
-cat > "$HELM_VALUES_OUT" <<EOF
+if [[ $MULTI_MODEL -eq 0 ]]; then
+    # Single-model: write model-specific vllm_extra_args from the sizing plan.
+    VLLM_ARGS_YAML="$(python3 - <<PY
+import json
+p = json.loads('''$PLAN_JSON''')
+for a in p.get("vllm_args", []):
+    print('  - "%s"' % a)
+PY
+)"
+    cat > "$HELM_VALUES_OUT" <<EOF
 # Generated by deploy.sh — do not commit.
 namespace: ${NAMESPACE}
 student_count: ${STUDENTS}
@@ -526,7 +733,49 @@ gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 content_repo: "${CONTENT_REPO}"
 hf_token: ""
+vllm_extra_args:
+${VLLM_ARGS_YAML}
 EOF
+else
+    # Multi-model goes through the agentgateway, so it gets API-key auth: mint a key
+    # (students send it as VLLM_API_KEY / `Authorization: Bearer`). Reuse a pre-set
+    # key on re-runs so existing pods keep working.
+    GATEWAY_API_KEY="${GATEWAY_API_KEY:-sk-workshop-$(openssl rand -hex 20)}"
+    # Multi-model: emit models list with per-model extra_args.
+    MODELS_YAML="$(python3 - <<PY
+import json
+p = json.loads('''$PLAN_JSON''')
+lines = []
+for m in p["models"]:
+    lines.append('  - name: "%s"' % m["model"])
+    lines.append('    slug: "%s"' % m["model_slug"])
+    lines.append('    replicas: %d' % m["replicas"])
+    lines.append('    tensor_parallel_size: %d' % m["tensor_parallel_size"])
+    lines.append('    gpu_pool_label: "%s"' % m["gpu_pool_label"])
+    args = m.get("vllm_args", [])
+    if args:
+        lines.append('    extra_args:')
+        for a in args:
+            lines.append('      - "%s"' % a)
+print("\n".join(lines))
+PY
+)"
+    cat > "$HELM_VALUES_OUT" <<EOF
+# Generated by deploy.sh — do not commit.
+namespace: ${NAMESPACE}
+student_count: ${STUDENTS}
+multi_model: true
+models:
+${MODELS_YAML}
+max_model_len: ${MAX_MODEL_LEN}
+gpu_memory_util: ${GPU_MEMORY_UTIL}
+workspace_image: ${WORKSPACE_IMAGE}
+vllm_host: http://agentgateway:8080/v1
+content_repo: "${CONTENT_REPO}"
+gateway_api_key: "${GATEWAY_API_KEY}"
+hf_token: ""
+EOF
+fi
 ok "Wrote ${HELM_VALUES_OUT}"
 
 # ---- Provision (terraform + helm + vLLM + TLS) ----
@@ -534,7 +783,8 @@ echo ""
 rule
 printf '%b\n' "  ${BOLD}Provisioning${RESET}"
 rule
-env NAMESPACE="$NAMESPACE" DOMAIN="$DOMAIN" HELM_VALUES="$HELM_VALUES_OUT" \
+env NAMESPACE="$NAMESPACE" DOMAIN="$DOMAIN" SUBDOMAIN_PREFIX="$SUBDOMAIN_PREFIX" \
+    CERT_EMAIL="$CERT_EMAIL" HELM_VALUES="$HELM_VALUES_OUT" \
     STUDENT_COUNT="$STUDENTS" "${SCRIPTS}/provision.sh"
 
 # ---- Base host (for student URLs) ----
@@ -545,10 +795,16 @@ echo ""
 rule
 printf '%b\n' "  ${BOLD}Generating ${STUDENTS} student workspaces${RESET}"
 rule
-env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-pods.sh" \
-    -n "$STUDENTS" --host "$BASE_HOST" \
-    --namespace "$NAMESPACE" --image "$WORKSPACE_IMAGE" \
-    --model "$MODEL" --content-repo "$CONTENT_REPO"
+GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
+    --namespace "$NAMESPACE" --image "$WORKSPACE_IMAGE"
+    --content-repo "$CONTENT_REPO")
+if [[ $MULTI_MODEL -eq 0 ]]; then
+    GEN_PODS_ARGS+=(--model "$MODEL")
+else
+    GEN_PODS_ARGS+=(--model "$MODEL" --vllm-host "http://agentgateway:8080/v1"
+        --model-names "$MODELS" --api-key "$GATEWAY_API_KEY")
+fi
+env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-pods.sh" "${GEN_PODS_ARGS[@]}"
 
 export KUBECONFIG="${INFRA}/kubeconfig.yaml"
 kubectl apply -f "${GEN_DIR}/"
@@ -559,8 +815,20 @@ echo ""
 rule
 printf '%b\n' "  ${GREEN}${BOLD}Classroom ready${RESET}"
 rule
+INFER_EP="http://vllm:8000/v1"
+[[ $MULTI_MODEL -eq 1 ]] && INFER_EP="http://agentgateway:8080/v1"
 echo ""
 printf "  ${DIM}%-14s${RESET} %s\n" "Base host:"    "$BASE_HOST"
+printf "  ${DIM}%-14s${RESET} %s\n" "Model(s):"     "${MODELS//,/, }"
+printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"    "${INFER_EP}  (in-cluster only)"
+if [[ -n "$GATEWAY_API_KEY" ]]; then
+    printf "  ${DIM}%-14s${RESET} %s\n" "API key:"      "$GATEWAY_API_KEY"
+    printf '%b\n' "  ${DIM}               injected into every workspace as \$VLLM_API_KEY (sent as Bearer);${RESET}"
+    printf '%b\n' "  ${DIM}               not exposed publicly (ClusterIP + NetworkPolicy-gated)${RESET}"
+else
+    printf '%b\n' "  ${DIM}               reached from a student workspace via \$VLLM_HOST — no API key;${RESET}"
+    printf '%b\n' "  ${DIM}               not exposed publicly (ClusterIP + NetworkPolicy-gated)${RESET}"
+fi
 printf "  ${DIM}%-14s${RESET} %s\n" "Access cards:" "$CSV"
 if [[ -f "$CSV" ]]; then
     echo ""
@@ -570,4 +838,41 @@ fi
 echo ""
 printf "  ${DIM}%-14s${RESET} %s\n" "Print cards:" "${SCRIPTS}/print-access-cards.sh"
 printf "  ${DIM}%-14s${RESET} %s\n" "Tear down:"   "./deploy.sh teardown"
+
+# TLS status — warn loudly if the cert secret never got created (a silent issue-cert
+# failure otherwise leaves every URL on nginx's "not secure" self-signed fallback).
+# Existence alone isn't enough in domain mode: a wrong-SAN or self-signed secret
+# serves the same "not secure" page while passing a bare 'get secret', so check
+# what the cert actually covers and who signed it.
+_REISSUE_HINT="cd infra && LINODE_TOKEN=<token w/ Domains:R/W> DOMAIN=${DOMAIN} SUBDOMAIN_PREFIX=${SUBDOMAIN_PREFIX} NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh"
+if ! kubectl -n "$NAMESPACE" get secret workshop-tls >/dev/null 2>&1; then
+    echo ""
+    warn "TLS NOT SECURED: 'workshop-tls' secret is missing — browsers will show \"not secure\"."
+    printf '%b\n' "  ${DIM}nginx is serving its self-signed fallback. Issue the real cert (idempotent):${RESET}"
+    if [[ -n "$DOMAIN" ]]; then
+        printf '%b\n' "  ${DIM}  ${_REISSUE_HINT}${RESET}"
+    else
+        printf '%b\n' "  ${DIM}  cd infra && NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh${RESET}"
+    fi
+elif [[ -n "$DOMAIN" ]] && command -v openssl >/dev/null 2>&1; then
+    # kubectl decodes base64 itself — portable across macOS/Linux base64 flags.
+    _TLS_CRT="$(kubectl -n "$NAMESPACE" get secret workshop-tls \
+        -o go-template='{{index .data "tls.crt" | base64decode}}' 2>/dev/null || true)"
+    _PROBE_HOST="s01.${SUBDOMAIN_PREFIX}.${DOMAIN}"
+    if [[ -n "$_TLS_CRT" ]]; then
+        _CRT_SUBJECT="$(printf '%s' "$_TLS_CRT" | openssl x509 -noout -subject 2>/dev/null | sed 's/^subject= *//')"
+        _CRT_ISSUER="$(printf '%s' "$_TLS_CRT" | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer= *//')"
+        if ! printf '%s' "$_TLS_CRT" | openssl x509 -noout -checkhost "$_PROBE_HOST" 2>/dev/null | grep -q "does match"; then
+            echo ""
+            warn "TLS MISMATCH: workshop-tls exists but does not cover ${_PROBE_HOST} — browsers will show \"not secure\"."
+            printf '%b\n' "  ${DIM}Re-issue with the right names (idempotent):${RESET}"
+            printf '%b\n' "  ${DIM}  ${_REISSUE_HINT}${RESET}"
+        elif [[ -n "$_CRT_SUBJECT" && "$_CRT_SUBJECT" == "$_CRT_ISSUER" ]]; then
+            echo ""
+            warn "TLS SELF-SIGNED: workshop-tls covers ${_PROBE_HOST} but is not CA-signed — browsers will show \"not secure\"."
+            printf '%b\n' "  ${DIM}Issue a trusted Let's Encrypt cert (idempotent):${RESET}"
+            printf '%b\n' "  ${DIM}  ${_REISSUE_HINT}${RESET}"
+        fi
+    fi
+fi
 echo ""

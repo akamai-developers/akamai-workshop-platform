@@ -36,7 +36,63 @@ So `g2-gpu-rtx4000a4-s` = 4× RTX 4000 Ada (4 × 20 = **80 GB VRAM**) with the s
 Assumptions: short agent turns, fp8 weights, fp16 KV, `--gpu-memory-utilization 0.9`,
 `--max-model-len 8192`, prefix caching ON.
 
-1. **VRAM per replica** = `weights + (per_token_KV × max_len × active_slots) + 1.5 GB`,
+### KV cache sizing
+
+The sizing calculator estimates actual KV cache memory based on model architecture
+parameters (from HuggingFace `config.json`), student concurrency, and context length.
+This replaced the earlier flat 1.25x VRAM headroom multiplier.
+
+**Per-token KV cache memory (one layer):**
+
+```
+kv_per_token = 2 × num_kv_heads × head_dim × kv_dtype_bytes
+```
+
+The `2` accounts for both the key and value projections. `kv_dtype_bytes` is 2 (FP16)
+for all models — vLLM uses FP16 KV cache regardless of weight quantization.
+
+**Total KV cache (all layers, all concurrent slots):**
+
+```
+concurrent_estimate = ceil(students × 0.3)      # ~30% active at any moment
+active_slots        = max(concurrent_estimate, 4) # floor of 4 for burst headroom
+kv_cache_gb         = (kv_per_token × num_layers × context_len × active_slots) / 1024³
+```
+
+The context length used for sizing is 4096 tokens (`KV_SIZING_CONTEXT_LEN`), not the
+vLLM `--max-model-len`. Workshop students rarely exceed 4K tokens in a single
+conversation turn.
+
+**Total VRAM needed:**
+
+```
+total_vram = model_weights_gb + kv_cache_gb + 1.5 GB (framework overhead)
+must fit:    total_vram ≤ gpu_pool_vram × 0.9
+```
+
+The 1.5 GB framework overhead covers CUDA contexts, the weight loader, and the vLLM
+scheduler. The sizing preview shows this breakdown:
+
+```
+VRAM: 18 GB weights + 2.25 GB KV cache + 1.5 GB overhead = ~21.8 GB total
+```
+
+### Model architecture parameters
+
+Each model in the catalog carries its KV cache architecture (`num_layers`,
+`num_kv_heads`, `head_dim`, `kv_dtype_bytes`). These are sourced from HuggingFace
+`config.json` and verified for Qwen3-8B, Llama-3.1-8B, and DeepSeek-R1-8B.
+
+| Field | config.json key | Description |
+|---|---|---|
+| `num_layers` | `num_hidden_layers` | Transformer layer count |
+| `num_kv_heads` | `num_key_value_heads` | KV attention heads (GQA uses fewer than query heads) |
+| `head_dim` | `head_dim` or `hidden_size / num_attention_heads` | Dimension per attention head |
+| `kv_dtype_bytes` | — | Always 2 (FP16 KV cache) |
+
+### VRAM budget
+
+1. **VRAM per replica** = `weights + kv_cache + 1.5 GB`,
    and it must fit inside `0.9 × node_VRAM`.
 2. **Students per replica** (conservative planning numbers):
    - 20 GB (1× Ada): **~15**
@@ -85,6 +141,32 @@ Assumptions: short agent turns, fp8 weights, fp16 KV, `--gpu-memory-utilization 
 Always cap `--max-model-len` and keep prefix caching on — a shared class system prompt +
 tool schemas is a large KV win. Gated models (e.g. Llama 3.x) are intentionally off the
 menu to keep the no-token guarantee.
+
+## Multi-model sizing
+
+When deploying multiple models, the sizing calculator computes independent GPU plans
+per model and aggregates the costs. CPU nodes are shared across all models.
+
+```bash
+# Per-model plans + aggregate cost (JSON for scripting)
+infra/scripts/sizing.py multi-plan --students 40 \
+  --models "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8" --json
+
+# Human-readable preview
+infra/scripts/sizing.py multi-plan --students 40 \
+  --models "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
+```
+
+Each model gets its own GPU node pool with a distinct label (e.g.
+`gpu-qwen-qwen3-8b-fp8`). The KV cache is sized independently per model — a model
+with more KV heads or layers consumes more VRAM for the same student count.
+
+### Model slugs
+
+Model names are converted to Kubernetes-safe slugs for resource names:
+`Qwen/Qwen3-8B-FP8` becomes `qwen-qwen3-8b-fp8`. The slug is lowercase,
+non-alphanumeric characters become hyphens, capped at 40 characters. The same
+`slugify()` function is used in both `sizing.py` and `deploy.sh`.
 
 ## Empirical sizing — `make capacity-test`
 

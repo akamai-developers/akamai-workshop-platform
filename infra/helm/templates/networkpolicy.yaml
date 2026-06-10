@@ -29,6 +29,7 @@ spec:
         - protocol: TCP
           port: 8080
 ---
+{{- if not .Values.multi_model }}
 # Allow only workspaces (and the load/capacity test) in this namespace to reach
 # vLLM on 8000. Student pods cannot reach each other; everything else is denied.
 apiVersion: networking.k8s.io/v1
@@ -52,3 +53,48 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+{{- else }}
+# Multi-model: workspaces reach agentgateway; agentgateway reaches vLLM backends.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workspaces-to-gateway
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: gateway.networking.k8s.io/gateway-name
+        operator: Exists
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: workspace
+        - podSelector:
+            matchLabels:
+              app: capacity-test
+      ports:
+        - protocol: TCP
+          port: {{ .Values.agentgateway_port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-vllm
+  namespace: {{ .Values.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: vllm
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: gateway.networking.k8s.io/gateway-name
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 8000
+{{- end }}
