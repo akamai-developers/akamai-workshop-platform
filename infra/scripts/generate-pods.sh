@@ -83,6 +83,13 @@ EOF
     esac
 done
 
+# An empty host (e.g. a failed 'terraform output -raw base_host' substitution)
+# would emit invalid ingress hosts like "s01." and poison access-cards.csv.
+if [[ -z "${HOST}" ]]; then
+    echo "ERROR: --host is required (e.g. --host \$(cd ../terraform && terraform output -raw base_host))" >&2
+    exit 1
+fi
+
 # Default MODEL_NAMES to MODEL if not set.
 MODEL_NAMES="${MODEL_NAMES:-$MODEL}"
 

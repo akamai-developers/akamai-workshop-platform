@@ -261,6 +261,22 @@ interactive() { [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; }
 
 TOTAL_STEPS=6
 
+# Seed wizard defaults from the previous deployment. terraform.tfvars survives
+# teardown precisely so a re-deploy can offer the same answers back — without
+# this every fresh wizard falls back to hardcoded defaults, and a silently
+# renamed deployment can collide with whatever else lives in the account.
+# (Flags and --config still override; --yes runs stay on documented defaults.)
+_PREV_LABEL=""; _PREV_DOMAIN=""; _PREV_REGION=""
+if [[ -f "$TFVARS_OUT" ]]; then
+    _tfv() {
+        grep -E "^[[:space:]]*$1[[:space:]]*=" "$TFVARS_OUT" 2>/dev/null \
+            | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]*)".*/\1/p' || true
+    }
+    _PREV_LABEL="$(_tfv label)"
+    _PREV_DOMAIN="$(_tfv domain)"
+    _PREV_REGION="$(_tfv region)"
+fi
+
 # ---- Collect inputs (prompt only when interactive and unset) ----
 if interactive; then
     echo ""
@@ -271,7 +287,8 @@ if interactive; then
     # -- Step 1: Deployment name --
     if [[ -z "$LABEL" ]]; then
         step_header 1 $TOTAL_STEPS "Deployment name"
-        prompt_input "Name" "ai-agents-workshop" LABEL
+        [[ -n "$_PREV_LABEL" ]] && printf '%b\n' "        ${DIM}Default carried over from your last deploy${RESET}"
+        prompt_input "Name" "${_PREV_LABEL:-ai-agents-workshop}" LABEL
     else
         step_header 1 $TOTAL_STEPS "Deployment name"
         ok "pre-set: ${LABEL}"
@@ -354,10 +371,14 @@ if interactive; then
     # -- Step 5: Domain & TLS --
     step_header 5 $TOTAL_STEPS "Domain & TLS"
     if [[ -z "$DOMAIN" ]]; then
-        printf '%b\n' "        ${DIM}Leave blank for sslip.io + self-signed TLS${RESET}"
+        if [[ -n "$_PREV_DOMAIN" ]]; then
+            printf '%b\n' "        ${DIM}Default carried over from your last deploy; type 'none' for sslip.io + self-signed TLS${RESET}"
+        else
+            printf '%b\n' "        ${DIM}Leave blank for sslip.io + self-signed TLS${RESET}"
+        fi
         printf '%b\n' "        ${DIM}Type 'list' to see domains in your Linode account${RESET}"
         while true; do
-            prompt_input "Domain" "none" DOMAIN
+            prompt_input "Domain" "${_PREV_DOMAIN:-none}" DOMAIN
             case "$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')" in
                 '?'|l|ls|list)
                     _list_linode_domains
@@ -380,7 +401,7 @@ if interactive; then
         printf '%b\n' "        ${DIM}Discovering GPU-capable regions...${RESET}"
         echo ""
         "${SCRIPTS}/regions.sh" list 2>/dev/null || true
-        prompt_input "Region" "us-ord" REGION
+        prompt_input "Region" "${_PREV_REGION:-us-ord}" REGION
     else
         ok "pre-set: ${REGION}"
     fi
@@ -556,12 +577,18 @@ if interactive; then
 fi
 
 # ---- Token check (only now that we're really deploying) ----
-export TF_VAR_token="${TF_VAR_token:-${LINODE_TOKEN:-}}"
-[[ -n "$TF_VAR_token" ]] || err "set TF_VAR_token or LINODE_TOKEN before deploying."
+# $TF_VAR_token and $LINODE_TOKEN are interchangeable. Probe each (TF_VAR_token
+# first, quick /v4/profile GET) and deploy with the first one the API accepts,
+# so a stale token lingering in a shell profile can't shadow a good one — the
+# same contract issue-cert.sh / provision.sh / teardown.sh follow. Invalid
+# tokens still fail fast and clear here, not deep inside 'terraform apply'.
+[[ -n "${TF_VAR_token:-}${LINODE_TOKEN:-}" ]] || err "set TF_VAR_token or LINODE_TOKEN before deploying."
 
-# Validate the token now (a quick /v4/profile GET) so an invalid or expired token
-# fails fast and clear, instead of deep inside 'terraform apply'.
-TOKEN_HTTP="$(python3 - "$TF_VAR_token" <<'PY'
+_TOKEN_PICKED=""
+for _CAND_SRC in TF_VAR_token LINODE_TOKEN; do
+    _CAND="${!_CAND_SRC:-}"
+    [[ -n "$_CAND" ]] || continue
+    TOKEN_HTTP="$(python3 - "$_CAND" <<'PY'
 import sys, urllib.request, urllib.error
 req = urllib.request.Request("https://api.linode.com/v4/profile",
                              headers={"Authorization": "Bearer " + sys.argv[1]})
@@ -574,12 +601,46 @@ except Exception:
     print("")
 PY
 )"
-case "$TOKEN_HTTP" in
-    200) ok "Linode token valid" ;;
-    401|403) err "Linode token rejected (HTTP ${TOKEN_HTTP}). Check \$TF_VAR_token or \$LINODE_TOKEN; it may be invalid or expired." ;;
-    "")  warn "could not reach the Linode API to validate the token; continuing." ;;
-    *)   warn "unexpected response (HTTP ${TOKEN_HTTP}) validating the token; continuing." ;;
-esac
+    case "$TOKEN_HTTP" in
+        200) ok "Linode token valid (from \$${_CAND_SRC})"; _TOKEN_PICKED="$_CAND"; break ;;
+        401|403) warn "token from \$${_CAND_SRC} rejected (HTTP ${TOKEN_HTTP}); trying next source." ;;
+        "")  warn "could not reach the Linode API to validate the token; continuing with \$${_CAND_SRC}."
+             _TOKEN_PICKED="$_CAND"; break ;;
+        *)   warn "unexpected response (HTTP ${TOKEN_HTTP}) validating \$${_CAND_SRC}; continuing with it."
+             _TOKEN_PICKED="$_CAND"; break ;;
+    esac
+done
+[[ -n "$_TOKEN_PICKED" ]] || err "the Linode API rejected every token it was given (\$TF_VAR_token, \$LINODE_TOKEN). Recreate one at https://cloud.linode.com/profile/tokens — and if your shell profile exports a stale LINODE_TOKEN, update it."
+export TF_VAR_token="$_TOKEN_PICKED"
+
+# ---- Deployment-name preflight ----
+# LKE cluster and firewall labels are account-unique, and terraform 400s
+# mid-apply on a collision (e.g. an old demo cluster with the same name).
+# Catch it here with a clear fix — unless this directory's terraform state
+# already owns that label (a normal idempotent re-deploy).
+if ! grep -qs "\"label\": \"${LABEL}\"" "${TF_DIR}/terraform.tfstate"; then
+    _LABEL_CLASH="$(python3 - "$TF_VAR_token" "$LABEL" <<'PY'
+import json, sys, urllib.request
+token, label = sys.argv[1], sys.argv[2]
+def labels(url):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return [d["label"] for d in json.load(r).get("data", [])]
+    except Exception:
+        return []   # advisory check: on API trouble, let terraform be the judge
+out = []
+if label in labels("https://api.linode.com/v4/lke/clusters?page_size=500"):
+    out.append("LKE cluster")
+if f"{label}-ingress" in labels("https://api.linode.com/v4/networking/firewalls?page_size=500"):
+    out.append("cloud firewall")
+print(", ".join(out))
+PY
+)"
+    if [[ -n "$_LABEL_CLASH" ]]; then
+        err "deployment name '${LABEL}' already exists in your account (${_LABEL_CLASH}) and is not managed by this directory's terraform state. Pick a different name (--label <name> or the Name prompt), or tear down / rename the old resources at https://cloud.linode.com/kubernetes"
+    fi
+fi
 
 # ---- Capacity preflight (advisory; never strands a half-built cluster) ----
 echo ""
@@ -722,7 +783,8 @@ echo ""
 rule
 printf '%b\n' "  ${BOLD}Provisioning${RESET}"
 rule
-env NAMESPACE="$NAMESPACE" DOMAIN="$DOMAIN" HELM_VALUES="$HELM_VALUES_OUT" \
+env NAMESPACE="$NAMESPACE" DOMAIN="$DOMAIN" SUBDOMAIN_PREFIX="$SUBDOMAIN_PREFIX" \
+    CERT_EMAIL="$CERT_EMAIL" HELM_VALUES="$HELM_VALUES_OUT" \
     STUDENT_COUNT="$STUDENTS" "${SCRIPTS}/provision.sh"
 
 # ---- Base host (for student URLs) ----
@@ -779,14 +841,38 @@ printf "  ${DIM}%-14s${RESET} %s\n" "Tear down:"   "./deploy.sh teardown"
 
 # TLS status — warn loudly if the cert secret never got created (a silent issue-cert
 # failure otherwise leaves every URL on nginx's "not secure" self-signed fallback).
+# Existence alone isn't enough in domain mode: a wrong-SAN or self-signed secret
+# serves the same "not secure" page while passing a bare 'get secret', so check
+# what the cert actually covers and who signed it.
+_REISSUE_HINT="cd infra && LINODE_TOKEN=<token w/ Domains:R/W> DOMAIN=${DOMAIN} SUBDOMAIN_PREFIX=${SUBDOMAIN_PREFIX} NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh"
 if ! kubectl -n "$NAMESPACE" get secret workshop-tls >/dev/null 2>&1; then
     echo ""
     warn "TLS NOT SECURED: 'workshop-tls' secret is missing — browsers will show \"not secure\"."
     printf '%b\n' "  ${DIM}nginx is serving its self-signed fallback. Issue the real cert (idempotent):${RESET}"
     if [[ -n "$DOMAIN" ]]; then
-        printf '%b\n' "  ${DIM}  cd infra && LINODE_TOKEN=<token w/ Domains:R/W> DOMAIN=${DOMAIN} SUBDOMAIN_PREFIX=${SUBDOMAIN_PREFIX} NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh${RESET}"
+        printf '%b\n' "  ${DIM}  ${_REISSUE_HINT}${RESET}"
     else
         printf '%b\n' "  ${DIM}  cd infra && NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh${RESET}"
+    fi
+elif [[ -n "$DOMAIN" ]] && command -v openssl >/dev/null 2>&1; then
+    # kubectl decodes base64 itself — portable across macOS/Linux base64 flags.
+    _TLS_CRT="$(kubectl -n "$NAMESPACE" get secret workshop-tls \
+        -o go-template='{{index .data "tls.crt" | base64decode}}' 2>/dev/null || true)"
+    _PROBE_HOST="s01.${SUBDOMAIN_PREFIX}.${DOMAIN}"
+    if [[ -n "$_TLS_CRT" ]]; then
+        _CRT_SUBJECT="$(printf '%s' "$_TLS_CRT" | openssl x509 -noout -subject 2>/dev/null | sed 's/^subject= *//')"
+        _CRT_ISSUER="$(printf '%s' "$_TLS_CRT" | openssl x509 -noout -issuer 2>/dev/null | sed 's/^issuer= *//')"
+        if ! printf '%s' "$_TLS_CRT" | openssl x509 -noout -checkhost "$_PROBE_HOST" 2>/dev/null | grep -q "does match"; then
+            echo ""
+            warn "TLS MISMATCH: workshop-tls exists but does not cover ${_PROBE_HOST} — browsers will show \"not secure\"."
+            printf '%b\n' "  ${DIM}Re-issue with the right names (idempotent):${RESET}"
+            printf '%b\n' "  ${DIM}  ${_REISSUE_HINT}${RESET}"
+        elif [[ -n "$_CRT_SUBJECT" && "$_CRT_SUBJECT" == "$_CRT_ISSUER" ]]; then
+            echo ""
+            warn "TLS SELF-SIGNED: workshop-tls covers ${_PROBE_HOST} but is not CA-signed — browsers will show \"not secure\"."
+            printf '%b\n' "  ${DIM}Issue a trusted Let's Encrypt cert (idempotent):${RESET}"
+            printf '%b\n' "  ${DIM}  ${_REISSUE_HINT}${RESET}"
+        fi
     fi
 fi
 echo ""

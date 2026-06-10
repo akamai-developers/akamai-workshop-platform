@@ -8,7 +8,7 @@ The [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop
 
 **Account:**
 
-- Create an [Akamai Cloud account](http://login.linode.com/signup?promo=akm-dev-git-300-31126-M055) with an API token (includes free credit). Export the token before you deploy: `export TF_VAR_token="your-linode-api-token"`. The wizard reads it from `$TF_VAR_token` or `$LINODE_TOKEN` and never writes it to a file.
+- Create an [Akamai Cloud account](http://login.linode.com/signup?promo=akm-dev-git-300-31126-M055) with an API token (includes free credit). Export the token before you deploy: `export TF_VAR_token="your-linode-api-token"`. The wizard reads it from `$TF_VAR_token` or `$LINODE_TOKEN` — the two are interchangeable and you only need one. If both are set, each is checked against the Linode API and the first working token wins (`$TF_VAR_token` preferred), so a stale token left in your shell profile is skipped instead of breaking the deploy. The token is never written to a file. Scopes: easiest is full access; the minimum is Read/Write on Kubernetes, Linodes, Firewalls, NodeBalancers, Volumes, and (domain mode) Domains.
 
 **Tools:**
 

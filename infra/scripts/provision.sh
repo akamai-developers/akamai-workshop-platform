@@ -36,13 +36,38 @@ fi
 
 terraform init -upgrade
 
+# If the caller didn't pass DOMAIN (e.g. a direct ./scripts/provision.sh re-run
+# instead of going through deploy.sh), recover it from terraform.tfvars —
+# otherwise Step 6 silently issues a self-signed cert for a deployment that has
+# a real domain, and the existing-secret check hides that on every later run.
+if [[ -z "${DOMAIN}" && -f terraform.tfvars ]]; then
+    DOMAIN="$(grep -E '^[[:space:]]*domain[[:space:]]*=' terraform.tfvars 2>/dev/null \
+        | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]+)".*/\1/p' || true)"
+fi
+
 # Pre-clean stale DNS records before apply. When Terraform state was lost in a
 # previous run, old A records linger and stack up (Linode allows duplicates).
 _DOMAIN="${DOMAIN:-}"
-_PREFIX="$(grep -E '^\s*subdomain_prefix\s*=' terraform.tfvars 2>/dev/null \
-    | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')"
+_PREFIX="${SUBDOMAIN_PREFIX:-$(grep -E '^[[:space:]]*subdomain_prefix[[:space:]]*=' terraform.tfvars 2>/dev/null \
+    | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]+)".*/\1/p' || true)}"
 _PREFIX="${_PREFIX:-workshop}"
-_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}"
+# Pick the first candidate token the API accepts for Domains — a stale
+# LINODE_TOKEN in a shell profile must not 401 the pre-clean into a silent
+# no-op, or duplicate A records stack up exactly as described above.
+_TOKEN=""
+for _CAND in "${TF_VAR_token:-}" "${LINODE_TOKEN:-}"; do
+    [[ -n "$_CAND" ]] || continue
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            -H "Authorization: Bearer ${_CAND}" \
+            https://api.linode.com/v4/domains || true)" == "200" ]]; then
+        _TOKEN="$_CAND"
+        break
+    fi
+done
+
+if [[ -n "$_DOMAIN" && -z "$_TOKEN" ]]; then
+    echo "  WARN: no token the Linode API accepts for Domains — skipping DNS pre-clean."
+fi
 
 if [[ -n "$_DOMAIN" && -n "$_TOKEN" ]]; then
     python3 - "$_TOKEN" "$_DOMAIN" "$_PREFIX" <<'PY' || true
@@ -188,7 +213,8 @@ echo ""
 echo "--- Step 6: Issue wildcard TLS cert (${DOMAIN:+domain: $DOMAIN}${DOMAIN:-no-domain / self-signed}) ---"
 if kubectl -n "${NAMESPACE}" get secret workshop-tls >/dev/null 2>&1; then
     echo "  ✓ workshop-tls already exists; skipping (re-issue with ./scripts/issue-cert.sh)"
-elif DOMAIN="${DOMAIN:-}" BASE_HOST="${BASE_HOST}" NAMESPACE="${NAMESPACE}" \
+elif DOMAIN="${DOMAIN:-}" SUBDOMAIN_PREFIX="${_PREFIX}" EMAIL="${CERT_EMAIL:-}" \
+        BASE_HOST="${BASE_HOST}" NAMESPACE="${NAMESPACE}" \
         "${SCRIPT_DIR}/issue-cert.sh"; then
     echo "  ✓ workshop-tls issued"
 else
@@ -206,7 +232,7 @@ else
   ! scope (required for the Let's Encrypt DNS-01 challenge).
   !
   ! Fix — supply a valid Domains-scoped token, then re-run (idempotent):
-  !     cd ${INFRA_DIR} && ${DOMAIN:+DOMAIN=${DOMAIN} }NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh
+  !     cd ${INFRA_DIR} && LINODE_TOKEN=<token with Domains:R/W> ${DOMAIN:+DOMAIN=${DOMAIN} SUBDOMAIN_PREFIX=${_PREFIX} }NAMESPACE=${NAMESPACE} ./scripts/issue-cert.sh
   ############################################################################
 EOF
 fi

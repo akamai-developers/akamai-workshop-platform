@@ -39,10 +39,10 @@ CLUSTER_REGION=""
 CLUSTER_NODES=""
 
 if [[ -f "${TF_DIR}/terraform.tfvars" ]]; then
-    CLUSTER_LABEL="$(grep -E '^\s*label\s*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
-        | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')"
-    CLUSTER_REGION="$(grep -E '^\s*region\s*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
-        | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')"
+    CLUSTER_LABEL="$(grep -E '^[[:space:]]*label[[:space:]]*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
+        | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]*)".*/\1/p' || true)"
+    CLUSTER_REGION="$(grep -E '^[[:space:]]*region[[:space:]]*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
+        | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]*)".*/\1/p' || true)"
 fi
 
 if [[ -f "${KUBECONFIG_PATH}" ]]; then
@@ -98,25 +98,52 @@ else
     printf '%b\n' "  ${DIM}No kubeconfig found; skipping K8s cleanup${RESET}"
 fi
 
-# Step 2: Terraform destroy
+# Step 2: Terraform destroy.
+# In-cluster-only charts (gpu-operator, cloud-firewall CRD/controller) die with
+# the cluster anyway — helm-uninstalling them first is wasted time and can
+# deadlock: terraform removes the controller before the CRD chart, nothing is
+# left to clear the CRD finalizers, and the uninstall hangs to its 5m timeout,
+# aborting the destroy with the cluster still up (and billing). Drop them from
+# state so destroy goes straight for the cluster. ingress-nginx stays managed:
+# its uninstall is what deletes the cloud NodeBalancer.
 echo ""
 printf '%b\n' "  ${BOLD}Step 2: Terraform destroy${RESET}"
 cd "${TF_DIR}"
-terraform destroy -auto-approve || true
+for _REL in helm_release.cloud_firewall_crd helm_release.cloud_firewall_controller helm_release.gpu_operator; do
+    terraform state rm "$_REL" >/dev/null 2>&1 || true
+done
+TF_DESTROY_RC=0
+terraform destroy -auto-approve || TF_DESTROY_RC=$?
 
 # Step 3: Clean up stale DNS records (survives lost Terraform state).
 # When Terraform state is wiped, the DNS records from previous deploys remain
 # and stack up on the next deploy. This step removes them via the Linode API.
-_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}"
+# Pick the first candidate token the API accepts for Domains — a stale
+# LINODE_TOKEN in a shell profile must not 401 this step into a no-op.
+_TOKEN=""
+for _CAND in "${TF_VAR_token:-}" "${LINODE_TOKEN:-}"; do
+    [[ -n "$_CAND" ]] || continue
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+            -H "Authorization: Bearer ${_CAND}" \
+            https://api.linode.com/v4/domains || true)" == "200" ]]; then
+        _TOKEN="$_CAND"
+        break
+    fi
+done
 _DOMAIN=""
 _PREFIX=""
 if [[ -f "${TF_DIR}/terraform.tfvars" ]]; then
-    _DOMAIN="$(grep -E '^\s*domain\s*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
-        | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')"
-    _PREFIX="$(grep -E '^\s*subdomain_prefix\s*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
-        | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')"
+    _DOMAIN="$(grep -E '^[[:space:]]*domain[[:space:]]*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
+        | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]+)".*/\1/p' || true)"
+    _PREFIX="$(grep -E '^[[:space:]]*subdomain_prefix[[:space:]]*=' "${TF_DIR}/terraform.tfvars" 2>/dev/null \
+        | head -1 | sed -nE 's/.*=[[:space:]]*"([^"]+)".*/\1/p' || true)"
 fi
 _PREFIX="${_PREFIX:-workshop}"
+
+if [[ -z "$_TOKEN" && -n "$_DOMAIN" ]]; then
+    printf '%b\n' "  ${DIM}WARN: no token the Linode API accepts for Domains — skipping DNS cleanup.${RESET}"
+    printf '%b\n' "  ${DIM}Stale ${_PREFIX}.${_DOMAIN} A records may remain (next deploy pre-cleans them).${RESET}"
+fi
 
 if [[ -n "$_TOKEN" && -n "$_DOMAIN" ]]; then
     echo ""
@@ -158,12 +185,43 @@ else
     printf '%b\n' "  ${DIM}No domain in tfvars or no token; skipping DNS cleanup${RESET}"
 fi
 
-# Local cleanup
-rm -f "${KUBECONFIG_PATH}"
-rm -rf "${INFRA_DIR}/manifests/generated"
+# Final status — verify against the API rather than assert. A failed destroy
+# once printed "All resources destroyed." while the cluster kept billing.
+_SURVIVOR=""
+if [[ -n "$_TOKEN" && -n "$CLUSTER_LABEL" ]]; then
+    _SURVIVOR="$(python3 - "$_TOKEN" "$CLUSTER_LABEL" <<'PY'
+import json, sys, urllib.request
+token, label = sys.argv[1], sys.argv[2]
+try:
+    req = urllib.request.Request("https://api.linode.com/v4/lke/clusters?page_size=500",
+                                 headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        for c in json.load(r).get("data", []):
+            if c["label"] == label:
+                print(c["id"])
+                break
+except Exception:
+    pass
+PY
+)"
+fi
+
+# Local cleanup — but keep the kubeconfig if the cluster survived; you need it.
+if [[ -z "$_SURVIVOR" ]]; then
+    rm -f "${KUBECONFIG_PATH}"
+    rm -rf "${INFRA_DIR}/manifests/generated"
+fi
 
 echo ""
 rule
-printf '%b\n' "  ${GREEN}${BOLD}All resources destroyed.${RESET}"
+if [[ -n "$_SURVIVOR" ]]; then
+    printf '%b\n' "  ${RED}${BOLD}TEARDOWN INCOMPLETE${RESET}${RED} — cluster '${CLUSTER_LABEL}' (id ${_SURVIVOR}) still exists and is billing.${RESET}"
+    printf '%b\n' "  ${DIM}Re-run: ./deploy.sh teardown    (kubeconfig and generated/ kept for debugging)${RESET}"
+elif [[ "${TF_DESTROY_RC}" -ne 0 ]]; then
+    printf '%b\n' "  ${YELLOW}${BOLD}Teardown finished with terraform errors${RESET}${YELLOW} (exit ${TF_DESTROY_RC}).${RESET}"
+    printf '%b\n' "  ${DIM}The cluster is gone per the API, but check https://cloud.linode.com for leftovers.${RESET}"
+else
+    printf '%b\n' "  ${GREEN}${BOLD}All resources destroyed.${RESET}"
+fi
 rule
 echo ""

@@ -76,43 +76,105 @@ if [ -z "${DOMAIN}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Token discovery
+# 1. Token discovery — try each source in order and use the FIRST token the
+#    Linode API accepts for listing Domains (the one scope this script needs).
+#
+#    Why validate per-source instead of picking one and failing: a stale
+#    LINODE_TOKEN exported in a shell profile must not shadow the fresh
+#    TF_VAR_token that terraform just provisioned the cluster with. That exact
+#    foot-gun once shipped a classroom on nginx's self-signed fallback —
+#    deploy.sh validated TF_VAR_token, but this script grabbed the dead
+#    LINODE_TOKEN from ~/.bashrc and bailed. TF_VAR_token is probed first to
+#    match the precedence everywhere else (deploy.sh, provision.sh, teardown).
 # ---------------------------------------------------------------------------
-if [ -z "${LINODE_TOKEN:-}" ] && [ -n "${TF_VAR_token:-}" ]; then
-    LINODE_TOKEN="${TF_VAR_token}"
+command -v curl >/dev/null 2>&1 || { echo "ERROR: curl not found." >&2; exit 1; }
+
+_probe_token() {
+    # Probe /v4/domains, not /v4/profile: proves the token is live AND carries
+    # the 'Domains: Read/Write' scope DNS-01 needs. Prints the HTTP status;
+    # 000 means the API was unreachable. '|| true': a transport failure must
+    # not silently kill the script under set -e.
+    curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+        -H "Authorization: Bearer $1" \
+        https://api.linode.com/v4/domains || true
+}
+
+TFVARS_TOKEN=""
+if [ -f "${INFRA_DIR}/terraform/terraform.tfvars" ]; then
+    # head -n1: terraform semantics tolerate duplicate keys, a curl header
+    # doesn't tolerate a multi-line value. sed -n…p: a tfvars without a token
+    # line (deploy.sh never writes one) or with token = "" yields "", and
+    # '|| true' keeps the empty grep from a set -e/pipefail death.
+    TFVARS_TOKEN=$(grep -E '^[[:space:]]*token[[:space:]]*=' "${INFRA_DIR}/terraform/terraform.tfvars" \
+        | head -n1 | sed -nE 's/.*=[[:space:]]*"([^"]+)".*/\1/p' || true)
 fi
 
-if [ -z "${LINODE_TOKEN:-}" ] && [ -f "${INFRA_DIR}/terraform/terraform.tfvars" ]; then
-    LINODE_TOKEN=$(grep -E '^\s*token\s*=' "${INFRA_DIR}/terraform/terraform.tfvars" \
-        | sed -E 's/.*=\s*"([^"]+)".*/\1/')
-fi
-
-if [ -z "${LINODE_TOKEN:-}" ]; then
+if [ -z "${LINODE_TOKEN:-}" ] && [ -z "${TF_VAR_token:-}" ] && [ -z "${TFVARS_TOKEN}" ]; then
     echo "ERROR: set LINODE_TOKEN, TF_VAR_token, or put it in terraform/terraform.tfvars" >&2
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# 2. Token validation — profile reachable, AND Domains scope granted
-#
-#    The cheap /v4/profile check only proves the token isn't expired. To
-#    actually reach lego's code path we need to confirm Domains: Read/Write,
-#    which only shows up when you hit /v4/domains.
-# ---------------------------------------------------------------------------
-if ! curl -sf -H "Authorization: Bearer ${LINODE_TOKEN}" \
-        https://api.linode.com/v4/profile >/dev/null; then
-    echo "ERROR: Linode API rejected the token (401)." >&2
-    echo "  - is it expired?" >&2
-    echo "  - does it match TF_VAR_token / terraform.tfvars?" >&2
+TOKEN_SOURCE=""
+TOKENS_TRIED=""
+for SOURCE in TF_VAR_token LINODE_TOKEN terraform.tfvars; do
+    case "${SOURCE}" in
+        TF_VAR_token)     CANDIDATE="${TF_VAR_token:-}" ;;
+        LINODE_TOKEN)     CANDIDATE="${LINODE_TOKEN:-}" ;;
+        terraform.tfvars) CANDIDATE="${TFVARS_TOKEN}" ;;
+    esac
+    [ -n "${CANDIDATE}" ] || continue
+    HTTP_CODE="$(_probe_token "${CANDIDATE}")"
+    case "${HTTP_CODE}" in
+        200)
+            LINODE_TOKEN="${CANDIDATE}"
+            TOKEN_SOURCE="${SOURCE}"
+            break
+            ;;
+        000)
+            echo "ERROR: cannot reach api.linode.com — network down, DNS, or proxy issue." >&2
+            echo "       This is not a token problem. Fix connectivity and re-run." >&2
+            exit 1
+            ;;
+        401)
+            echo "WARNING: token from ${SOURCE} rejected by the Linode API (401 — expired or revoked?); trying next source." >&2
+            ;;
+        *)
+            echo "WARNING: token from ${SOURCE} cannot list Domains (HTTP ${HTTP_CODE} — missing 'Domains: Read/Write' scope?); trying next source." >&2
+            ;;
+    esac
+    TOKENS_TRIED="${TOKENS_TRIED:+${TOKENS_TRIED}, }${SOURCE}"
+done
+
+if [ -z "${TOKEN_SOURCE}" ]; then
+    echo "ERROR: no usable Linode token (tried: ${TOKENS_TRIED})." >&2
+    echo "  Every candidate was rejected or lacks 'Domains: Read/Write' scope." >&2
+    echo "  Recreate at https://cloud.linode.com/profile/tokens with:" >&2
+    echo "    Domains: Read/Write   (required for DNS-01 challenge)" >&2
+    echo "  If your shell profile exports a stale LINODE_TOKEN, update or remove it." >&2
     exit 1
 fi
+echo "Using Linode token from ${TOKEN_SOURCE}."
+
+# ---------------------------------------------------------------------------
+# 2. Fetch the full Domains listing (feeds zone discovery below). The probe
+#    already proved liveness + scope, so a failure here is a network blip or
+#    a revocation race — report it accurately either way.
+# ---------------------------------------------------------------------------
 
 DOMAINS_JSON="$(mktemp -t linode-domains.XXXXXX.json)"
 trap 'rm -f "${DOMAINS_JSON}"' EXIT
 
-DOMAINS_HTTP=$(curl -s -o "${DOMAINS_JSON}" -w "%{http_code}" \
+# '|| true': on a transport failure %{http_code} prints 000 and the checks
+# below report it — without it, set -e kills the script with zero output.
+DOMAINS_HTTP=$(curl -s -o "${DOMAINS_JSON}" -w "%{http_code}" --max-time 30 \
     -H "Authorization: Bearer ${LINODE_TOKEN}" \
-    "https://api.linode.com/v4/domains?page_size=500")
+    "https://api.linode.com/v4/domains?page_size=500" || true)
+
+if [ "${DOMAINS_HTTP}" = "000" ]; then
+    echo "ERROR: cannot reach api.linode.com to list Domains (network drop mid-run?)." >&2
+    echo "       This is not a token problem. Fix connectivity and re-run." >&2
+    exit 1
+fi
 
 if [ "${DOMAINS_HTTP}" != "200" ]; then
     echo "ERROR: token cannot list Linode Domains (HTTP ${DOMAINS_HTTP})." >&2

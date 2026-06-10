@@ -46,7 +46,9 @@ Cluster-level: `gpu-operator` (NVIDIA drivers + device plugin),
 ## Quick Start
 
 ```bash
-# 1. Set API token (must have Domains: Read/Write, Linodes, NodeBalancers, Kubernetes, Volumes scopes)
+# 1. Set API token — Read/Write on: Kubernetes, Linodes, Firewalls, NodeBalancers,
+#    Volumes, and Domains (Domains drives the Let's Encrypt DNS-01 challenge).
+#    TF_VAR_token and LINODE_TOKEN are interchangeable; you only need one.
 export TF_VAR_token="your-linode-api-token"
 
 # 2. Log docker into ghcr.io
@@ -91,7 +93,7 @@ kubectl apply -f manifests/generated/
 `./scripts/issue-cert.sh` uses [lego](https://go-acme.github.io/lego/) + Linode DNS-01 to issue a wildcard Let's Encrypt cert for `*.<base-host>`, then stores it as the `workshop-tls` K8s Secret. The Ingress (generated in step 6) references that Secret.
 
 - **Idempotent**: re-run any time. If a cert exists locally in `.certs/`, lego will renew if near expiry, otherwise skip.
-- **Token source order**: `LINODE_TOKEN` env → `TF_VAR_token` env → `terraform/terraform.tfvars`.
+- **Token source order**: `TF_VAR_token` env → `LINODE_TOKEN` env → `terraform/terraform.tfvars`. Each candidate is probed against the Linode API and the first one that is valid **and** can list Domains wins; invalid or under-scoped candidates are skipped with a warning. The two env vars are interchangeable — you only need one.
 - **Required scopes on the token**: `Domains: Read/Write`. The script validates this before calling lego.
 - **`provision.sh` also tries to call this** at its final step, but as best-effort — if lego isn't installed, or the token lacks DNS scope, it logs a warning and continues. **Always confirm the secret exists** with `kubectl get secret workshop-tls -n workshop` before applying the Ingress.
 - **Renewal**: cert is valid 90 days. Re-run `./scripts/issue-cert.sh` to renew.
