@@ -144,6 +144,22 @@ assert "vLLM chat completion returns text" chat_ok
 assert "workspace ws-01 Ready" \
     kubectl -n "$NAMESPACE" wait --for=condition=Ready pod/ws-01 --timeout=300s
 
+# 2d-bis. Workshop content actually cloned (a REAL checkout, not a bare .git left by a
+#         failed clone). Ready does not gate on clone completion, so poll for ~120s.
+content_cloned() {
+    local i
+    for i in $(seq 1 24); do
+        if kubectl -n "$NAMESPACE" exec ws-01 -- bash -lc \
+              'git -C "${HOME}/workshop" rev-parse --verify HEAD >/dev/null 2>&1 \
+               && [ -n "$(ls -A "${HOME}/workshop" 2>/dev/null | grep -v "^\.git$")" ]'; then
+            return 0
+        fi
+        sleep 5
+    done
+    return 1
+}
+assert "workshop content cloned into ws-01 (real checkout)" content_cloned
+
 # 2e. https://s01.<base_host>/ serves the code-server login page.
 login_page_ok() {
     local body

@@ -36,13 +36,27 @@ resource "linode_lke_cluster" "workshop" {
   }
 }
 
+locals {
+  # Single-model: one pool from flat vars. Multi-model: use gpu_pools list.
+  effective_gpu_pools = var.multi_model ? {
+    for p in var.gpu_pools : p.label => p
+    } : {
+    "gpu" = {
+      type  = var.gpu_node_type
+      count = var.gpu_node_count
+      label = "gpu"
+    }
+  }
+}
+
 resource "linode_lke_node_pool" "gpu" {
+  for_each   = local.effective_gpu_pools
   cluster_id = linode_lke_cluster.workshop.id
-  type       = var.gpu_node_type
-  node_count = var.gpu_node_count
+  type       = each.value.type
+  node_count = each.value.count
 
   labels = {
-    pool = "gpu"
+    pool = each.value.label
   }
 }
 
@@ -77,7 +91,7 @@ resource "helm_release" "cloud_firewall_crd" {
   wait             = true
   timeout          = 300
 
-  depends_on = [linode_lke_cluster.workshop, linode_lke_node_pool.gpu]
+  depends_on = [linode_lke_cluster.workshop]
 }
 
 resource "helm_release" "cloud_firewall_controller" {
@@ -101,7 +115,7 @@ resource "helm_release" "gpu_operator" {
   wait             = true
   timeout          = 900
 
-  depends_on = [linode_lke_node_pool.gpu]
+  depends_on = [linode_lke_cluster.workshop]
 }
 
 resource "helm_release" "ingress_nginx" {

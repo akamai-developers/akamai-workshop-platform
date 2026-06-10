@@ -3,6 +3,66 @@
 All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 2026-06-08 — Multi-model support with agentgateway routing
+
+Added multi-model deployment support: instructors can select 2+ models (comma-separated),
+and the platform provisions independent GPU node pools per model with agentgateway as a
+unified OpenAI-compatible routing proxy. Single-model deployments are unchanged.
+
+### Documentation
+- **README.md**: added Multi-Model section with usage examples, config.yaml syntax,
+  and routing explanation. Updated Inputs table to note comma-separated model support.
+- **infra/docs/architecture.md**: added multi-model architecture section with routing
+  diagram, per-model GPU pool layout, and example Helm/Terraform values.
+- **infra/docs/sizing.md**: added KV cache formula documentation covering per-token
+  memory, concurrency estimation, VRAM budget breakdown, model architecture parameter
+  reference table, and multi-model sizing section with slug generation.
+
+### Added
+- **KV cache-aware sizing** (`infra/scripts/sizing.py`): model architecture params
+  (num_layers, num_kv_heads, head_dim) added to MODEL_CATALOG. New `kv_cache_gb()` function
+  estimates KV cache memory based on student concurrency. Sizing preview now shows
+  weights + KV cache + overhead breakdown. Verified against HuggingFace config.json.
+- **`sizing.py multi-plan`** subcommand: per-model GPU plans + aggregate cost for
+  multi-model deployments. Returns JSON with per-model sizing and shared CPU costs.
+- **`slugify()` function** in sizing.py: converts model names to k8s-safe slugs.
+- **Multi-model wizard** (`deploy.sh`): `--model` accepts comma-separated models.
+  Interactive prompt updated with multi-model hint. Multi-model preview shows per-model
+  GPU breakdown, agentgateway routing line, and total cost.
+- **Terraform multi-GPU-pool** (`infra/terraform/`): `gpu_pools` variable (list of objects)
+  and `multi_model` bool. `for_each` over pools creates per-model node pools with distinct
+  labels. Single-model uses flat vars unchanged. New `gpu_pool_labels` output.
+- **Helm multi-model templates** (`infra/helm/`): conditional rendering in
+  vllm-statefulset.yaml and vllm-service.yaml creates per-model StatefulSets/Services.
+  New `agentgateway.yaml` template deploys Gateway API resources (Gateway, AgentgatewayPolicy,
+  AgentgatewayBackend, HTTPRoute) for content-based routing by model field.
+- **Agentgateway routing**: reads the `model` field from JSON request body via CEL
+  extraction into x-model header, then HTTPRoute matches to the correct vLLM backend.
+- **NetworkPolicy updates**: multi-model adds allow-workspaces-to-gateway and
+  allow-gateway-to-vllm policies.
+- **Workspace MODEL_NAMES env var**: workspace-pod-template.yaml and generate-pods.sh
+  support `--model-names` flag for multi-model awareness.
+- **Provision multi-model** (`provision.sh`): installs Gateway API CRDs + agentgateway
+  Helm charts, waits for per-model vLLM StatefulSets, checks agentgateway readiness.
+- **Teardown updates** (`teardown.sh`): uses label selector `-l app=vllm` instead of
+  hardcoded name; cleans up agentgateway resources when present.
+- **Health-check updates** (`health-check.sh`): auto-detects multi-model by checking for
+  agentgateway Gateway; tests inference through gateway for each model.
+- **Pre-warm updates** (`pre-warm.sh`): accepts `--models` flag for multi-model warming.
+
+### Changed
+- `_pick_gpu_plan()` now uses `_total_vram_needed()` (weights + KV cache + 1.5GB overhead)
+  instead of the flat `VRAM_HEADROOM = 1.25` multiplier.
+- `format_plan()` shows VRAM breakdown: weights + KV cache + overhead = total.
+- `config.example.yaml` updated with `models:` key example.
+- `infra/helm/values.yaml` updated with multi-model defaults (multi_model, models,
+  agentgateway_image, agentgateway_port).
+
+### Backward compatibility
+- Single-model deployments produce identical output to before (verified via dry-run).
+- All existing terraform variables, helm values, and generate-pods flags unchanged.
+- Selftest passes with both single-model and multi-model assertions.
+
 ## 2026-06-06 — Phase 7: Docs & genericization audit
 
 Finalized the docs to the platform model and removed the last content-specific / personal

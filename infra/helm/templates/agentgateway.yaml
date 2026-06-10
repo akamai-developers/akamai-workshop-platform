@@ -1,0 +1,130 @@
+{{- if .Values.multi_model }}
+# --- agentgateway Gateway API CRDs are a prerequisite (installed by provision.sh) ---
+# --- Gateway: creates the agentgateway proxy listener ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway-proxy
+  namespace: {{ .Values.namespace }}
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - protocol: HTTP
+      port: {{ .Values.agentgateway_port }}
+      name: http
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# --- AgentgatewayPolicy: extract the "model" field from the JSON body into an x-model header ---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: extract-model
+  namespace: {{ .Values.namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway-proxy
+  traffic:
+    phase: PreRouting
+    transformation:
+      request:
+        set:
+          - name: "x-model"
+            value: 'json(request.body).model'
+---
+# --- Per-model backends ---
+{{- range .Values.models }}
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: vllm-{{ .slug }}
+  namespace: {{ $.Values.namespace }}
+spec:
+  ai:
+    groups:
+      - providers:
+          - name: {{ .slug }}
+            openai:
+              model: {{ .name }}
+            host: vllm-{{ .slug }}.{{ $.Values.namespace }}.svc.cluster.local
+            port: 8000
+---
+{{- end }}
+# --- HTTPRoute: match on x-model header and route to the correct backend ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vllm-routing
+  namespace: {{ .Values.namespace }}
+spec:
+  parentRefs:
+    - name: agentgateway-proxy
+      namespace: {{ .Values.namespace }}
+  rules:
+    {{- range .Values.models }}
+    - matches:
+        - headers:
+            - type: RegularExpression
+              name: x-model
+              value: {{ printf "^%s$" (.name | replace "." "\\.") | quote }}
+      backendRefs:
+        - name: vllm-{{ .slug }}
+          namespace: {{ $.Values.namespace }}
+          group: agentgateway.dev
+          kind: AgentgatewayBackend
+    {{- end }}
+---
+# --- Service for workspaces to reach agentgateway ---
+# The Gateway resource creates the actual listener pod; this Service fronts it
+# so workspaces can use a stable http://agentgateway:8080/v1 endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentgateway
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: agentgateway
+spec:
+  type: ClusterIP
+  selector:
+    gateway.networking.k8s.io/gateway-name: agentgateway-proxy
+  ports:
+    - port: {{ .Values.agentgateway_port }}
+      targetPort: {{ .Values.agentgateway_port }}
+      protocol: TCP
+      name: http
+{{- if .Values.gateway_api_key }}
+---
+# --- API-key auth: every request must carry `Authorization: Bearer <key>` ---
+# The key(s) live in this Secret (agentgateway's documented JSON-per-user format);
+# workspaces receive the value as $VLLM_API_KEY.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gateway-api-keys
+  namespace: {{ .Values.namespace }}
+type: Opaque
+stringData:
+  workshop: |
+    {"key": {{ .Values.gateway_api_key | quote }}, "metadata": {"user_id": "workshop"}}
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: gateway-api-key
+  namespace: {{ .Values.namespace }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentgateway-proxy
+  traffic:
+    apiKeyAuthentication:
+      mode: Strict
+      secretRef:
+        name: gateway-api-keys
+{{- end }}
+{{- end }}

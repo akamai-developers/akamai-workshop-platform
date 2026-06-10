@@ -39,8 +39,13 @@ SHRINK=0
 NAMESPACE="${NAMESPACE:-workshop}"
 WORKSPACE_IMAGE="${WORKSPACE_IMAGE:-ghcr.io/akamai-developers/ai-agents-workspace:latest}"
 MODEL="${MODEL:-Qwen/Qwen3-8B-FP8}"
+MODEL_NAMES=""
 VLLM_HOST="${VLLM_HOST:-http://vllm:8000/v1}"
 CONTENT_REPO="${CONTENT_REPO:-}"
+# Key students' OpenAI client sends as `Authorization: Bearer`. "not-needed" is the
+# harmless default when the endpoint has no auth; set to the real key when the
+# agentgateway enforces apiKeyAuthentication.
+VLLM_API_KEY="${VLLM_API_KEY:-not-needed}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -50,8 +55,10 @@ while [[ $# -gt 0 ]]; do
         --namespace) NAMESPACE="$2"; shift 2 ;;
         --image) WORKSPACE_IMAGE="$2"; shift 2 ;;
         --model) MODEL="$2"; shift 2 ;;
+        --model-names) MODEL_NAMES="$2"; shift 2 ;;
         --vllm-host) VLLM_HOST="$2"; shift 2 ;;
         --content-repo) CONTENT_REPO="$2"; shift 2 ;;
+        --api-key) VLLM_API_KEY="$2"; shift 2 ;;
         --rotate) ROTATE=1; shift ;;
         --shrink) SHRINK=1; shift ;;
         -h|--help)
@@ -63,8 +70,10 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --namespace       Kubernetes namespace (default: workshop)
   --image           Workspace container image (default: stock prebuilt image)
   --model           MODEL_NAME env stamped into each workspace (default: Qwen/Qwen3-8B-FP8)
+  --model-names     MODEL_NAMES env (comma-separated, multi-model; defaults to --model)
   --vllm-host       VLLM_HOST env stamped into each workspace (default: http://vllm:8000/v1)
   --content-repo    CONTENT_REPO env (git repo cloned at pod startup; "" → default)
+  --api-key         VLLM_API_KEY env (sent as Bearer to the gateway; "not-needed" if no auth)
   --rotate          Mint fresh passwords for every student. Required to change --host.
   --shrink          Allow N to be smaller than existing CSV; trimmed entries archived to .bak.
 EOF
@@ -73,6 +82,16 @@ EOF
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# An empty host (e.g. a failed 'terraform output -raw base_host' substitution)
+# would emit invalid ingress hosts like "s01." and poison access-cards.csv.
+if [[ -z "${HOST}" ]]; then
+    echo "ERROR: --host is required (e.g. --host \$(cd ../terraform && terraform output -raw base_host))" >&2
+    exit 1
+fi
+
+# Default MODEL_NAMES to MODEL if not set.
+MODEL_NAMES="${MODEL_NAMES:-$MODEL}"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -259,7 +278,9 @@ EOF
         -e "s|__WORKSPACE_IMAGE__|${WORKSPACE_IMAGE}|g" \
         -e "s|__VLLM_HOST__|${VLLM_HOST}|g" \
         -e "s|__MODEL__|${MODEL}|g" \
+        -e "s|__MODEL_NAMES__|${MODEL_NAMES}|g" \
         -e "s|__CONTENT_REPO__|${CONTENT_REPO}|g" \
+        -e "s|__VLLM_API_KEY__|${VLLM_API_KEY}|g" \
         "${TEMPLATE}" >> "${MANIFESTS_TMP}"
     echo "---" >> "${MANIFESTS_TMP}"
 

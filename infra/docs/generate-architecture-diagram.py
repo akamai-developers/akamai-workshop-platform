@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the architecture diagram for akamai-workshop-platform."""
+"""Generate the architecture diagram for akamai-workshop-platform.
+
+Requires `pip install diagrams` and graphviz (`brew install graphviz` /
+`apt install graphviz`). Produces an accurate Kubernetes diagram. Note: the
+committed architecture.png may instead be a gpt-image render — running this
+script overwrites it with the diagrams-rendered version.
+"""
 
 import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -30,8 +36,8 @@ with Diagram(
     students = User("Students\n(browser)")
 
     with Cluster("Akamai LKE Cluster"):
-        ing = Ingress("Ingress\nsNN.base-host")
-        np = NetworkPolicy("NetworkPolicy\ndefault-deny\nworkspace → vLLM only")
+        ing = Ingress("Ingress (nginx)\nsNN.workshop.host · TLS")
+        np = NetworkPolicy("NetworkPolicy\ndefault-deny\nworkspaces → gateway only")
 
         with Cluster("CPU Node Pool"):
             workspaces = [
@@ -40,10 +46,14 @@ with Diagram(
                 Pod("ws-N\ncode-server"),
             ]
 
-        with Cluster("GPU Node Pool"):
-            svc = Service("vllm:8000\nClusterIP")
-            vllm = StatefulSet("vLLM\n(model inference)")
+        with Cluster("Inference (multi-model)"):
+            gw = Service("agentgateway:8080\nClusterIP · API-key auth")
+            with Cluster("GPU Node Pools (1 per model)"):
+                vllm_a = StatefulSet("vllm-<modelA>\n:8000")
+                vllm_b = StatefulSet("vllm-<modelB>\n:8000")
 
-    students >> Edge(label="HTTPS") >> ing
+    students >> Edge(label="HTTPS / TLS") >> ing
     ing >> workspaces
-    workspaces >> Edge(style="dashed", label="internal") >> svc >> vllm
+    workspaces >> Edge(style="dashed", label="Authorization: Bearer") >> gw
+    gw >> Edge(label="route by model field") >> vllm_a
+    gw >> Edge(label="route by model field") >> vllm_b
