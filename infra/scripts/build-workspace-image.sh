@@ -20,8 +20,22 @@ INFRA_DIR="$(dirname "$SCRIPT_DIR")"
 CONTEXT="${INFRA_DIR}/images/workspace"
 
 REGISTRY="${REGISTRY:-ghcr.io/akamai-developers}"
-IMAGE="${IMAGE:-ai-agents-workspace}"
 TAG="${TAG:-latest}"
+
+# VARIANT selects the editor image: code-server (default) or jupyter. The jupyter
+# variant bakes jupyterlab + kubectl (Dockerfile.jupyter) and gets its own image name.
+VARIANT="${VARIANT:-code-server}"
+case "$VARIANT" in
+    jupyter)
+        DOCKERFILE="${CONTEXT}/Dockerfile.jupyter"
+        IMAGE="${IMAGE:-ai-agents-workspace-jupyter}"
+        ;;
+    code-server)
+        DOCKERFILE="${CONTEXT}/Dockerfile"
+        IMAGE="${IMAGE:-ai-agents-workspace}"
+        ;;
+    *) echo "ERROR: VARIANT must be 'code-server' or 'jupyter' (got '$VARIANT')" >&2; exit 1 ;;
+esac
 
 FULL_TAG="${REGISTRY}/${IMAGE}:${TAG}"
 
@@ -36,6 +50,7 @@ echo ""
 
 docker build \
     --tag "${FULL_TAG}" \
+    --file "${DOCKERFILE}" \
     --platform linux/amd64 \
     "${CONTEXT}"
 

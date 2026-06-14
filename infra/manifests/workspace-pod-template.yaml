@@ -26,6 +26,7 @@ spec:
         - containerPort: 8080
           name: http
       env:
+__WORKSPACE_TYPE_ENV__
         - name: PASSWORD
           valueFrom:
             secretKeyRef:

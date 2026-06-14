@@ -9,6 +9,27 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 2 — `editor: jupyter`
+- **`infra/images/workspace/startup.sh`**: branched the launch on `WORKSPACE_TYPE`
+  (default `code-server`). `jupyter` runs `jupyter lab` on `0.0.0.0:8080` with `$PASSWORD`
+  mapped to the access token (the same access card works). Added a best-effort jupyterlab
+  install into the `.venv` for the stock-image/ConfigMap path. The code-server runtime
+  path is behaviorally unchanged; a `WORKSPACE_PRINT_LAUNCH` test hook prints the resolved
+  command without starting a server.
+- **`infra/images/workspace/Dockerfile.jupyter`**: a Jupyter image variant — jupyterlab +
+  python + git + **kubectl on PATH** (for `cluster_access: scoped`), non-root `coder`
+  (UID 1000), `startup.sh` entrypoint. `build-workspace-image.sh` builds it via
+  `VARIANT=jupyter` (its own image name, `-f Dockerfile.jupyter`).
+- **`infra/manifests/workspace-pod-template.yaml` + `generate-pods.sh`**: thread
+  `workspace_type` via a `__WORKSPACE_TYPE_ENV__` sentinel. For code-server the sentinel
+  line is deleted (pod manifest byte-identical to golden); for jupyter it becomes a
+  `WORKSPACE_TYPE` env. `deploy.sh` passes `--workspace-type` and, when `editor=jupyter`
+  with no image override, defaults the workspace image to the Jupyter variant.
+- **`tests/bats/startup.bats`**: asserts the launch-branch selection.
+- Verified offline: code-server pod manifest byte-identical, both goldens hold, jupyter
+  manifest passes kubeconform, 15/15 bats. Docker build of the jupyter image is DEFERRED
+  (local disk full); the Dockerfile + build wiring are in place.
+
 ### Phase 1 — Component flags + config plumbing
 - **`infra/helm/values.yaml`**: added the component catalog keys (`editor`, `inference`,
   `gpus_per_student`, `cluster_access`, `object_storage`, `agent_deploy`), each defaulting
