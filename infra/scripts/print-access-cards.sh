@@ -7,11 +7,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$(dirname "$SCRIPT_DIR")"
 CSV="${INFRA_DIR}/manifests/generated/access-cards.csv"
 HTML="${INFRA_DIR}/manifests/generated/access-cards.html"
+HELM_VALUES="${INFRA_DIR}/manifests/helm-values.yaml"
 
 if [ ! -f "${CSV}" ]; then
     echo "No access-cards.csv found. Run generate-pods.sh first."
     exit 1
 fi
+
+# Composition: auto-detected from the generated helm-values.yaml (env/flags override).
+# Only used to add a NON-SECRET "pre-wired" note when cluster_access=scoped or
+# object_storage=managed. Default (none/none) leaves the card byte-identical to before.
+_detect() { grep -E "^$1:" "$HELM_VALUES" 2>/dev/null | head -1 | awk '{print $2}' || true; }
+NAMESPACE="${NAMESPACE:-$(_detect namespace)}";          NAMESPACE="${NAMESPACE:-workshop}"
+CLUSTER_ACCESS="${CLUSTER_ACCESS:-$(_detect cluster_access)}"; CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
+OBJECT_STORAGE="${OBJECT_STORAGE:-$(_detect object_storage)}"; OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
+for arg in "$@"; do
+    case "$arg" in
+        --cluster-access=*) CLUSTER_ACCESS="${arg#*=}" ;;
+        --object-storage=*) OBJECT_STORAGE="${arg#*=}" ;;
+        --namespace=*)      NAMESPACE="${arg#*=}" ;;
+    esac
+done
 
 cat > "${HTML}" << 'HEADER'
 <!DOCTYPE html>
@@ -33,6 +49,7 @@ cat > "${HTML}" << 'HEADER'
   .card .url { font-size: 12px; color: #666; word-break: break-all; margin: 8px 0; }
   .card .password { font-family: monospace; font-size: 18px; font-weight: bold; color: #c00; margin: 8px 0; }
   .card .label { font-size: 11px; color: #999; text-transform: uppercase; }
+  .card .extra { font-family: monospace; font-size: 11px; color: #333; margin: 4px 0; word-break: break-all; }
   .title { text-align: center; margin-bottom: 24px; }
   @media print {
     .grid { grid-template-columns: repeat(4, 1fr); }
@@ -57,8 +74,18 @@ tail -n +2 "${CSV}" | while IFS=, read -r num url password; do
     <div class="url">${url}</div>
     <div class="label">Password</div>
     <div class="password">${password}</div>
-  </div>
 EOF
+    # Non-secret pre-wired note (no key/kubeconfig material — just the namespace).
+    if [ "${CLUSTER_ACCESS}" = "scoped" ] || [ "${OBJECT_STORAGE}" = "managed" ]; then
+        _wired=""
+        [ "${CLUSTER_ACCESS}" = "scoped" ] && _wired="kubeconfig"
+        [ "${OBJECT_STORAGE}" = "managed" ] && _wired="${_wired:+${_wired} + }bucket"
+        cat >> "${HTML}" << EOF
+    <div class="label">Pre-wired</div>
+    <div class="extra">ns ${NAMESPACE}-${num} · ${_wired} ready</div>
+EOF
+    fi
+    echo "  </div>" >> "${HTML}"
 done
 
 cat >> "${HTML}" << 'FOOTER'

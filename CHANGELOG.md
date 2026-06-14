@@ -9,6 +9,23 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 6 — Example configs + operator affordances
+- **`examples/own-inference.yaml`** (jupyter + dedicated-vllm + 1 GPU/student + scoped +
+  agent_deploy:plain) and **`examples/sa-agent.yaml`** (jupyter + shared-vllm/external + scoped
+  + agent_deploy:plain + object_storage:managed) — fully commented, mirroring
+  `config.example.yaml`. A workshop is now a config file, not new code.
+- **`Makefile`**: `make verify-default` (helm golden diff + sizing self-test) and
+  `make verify-config CONFIG=...` (dry-run + validate a config); documented the
+  `make deploy ARGS="--config examples/…"` invocation.
+- **Access cards**: when `cluster_access: scoped` or `object_storage: managed`, both card
+  generators (`print-access-cards.sh`, `generate-cards.py`) add a NON-SECRET "pre-wired" note
+  (the student's namespace + that a kubeconfig/bucket is ready) — auto-detected from the
+  generated `helm-values.yaml`. The default card and the `access-cards.csv` are unchanged when
+  those components are off.
+- **README**: documented the two example workshops, the verify targets, and the access-card note.
+- **Verification (offline)**: both example configs dry-run into coherent plans; `make
+  verify-default` green; the default dry-run stays byte-identical.
+
 ### Phase 5 — `inference: dedicated-vllm` (1 GPU) + `inference: external` + component-aware sizing
 - **`infra/helm/templates/student-vllm.yaml`** (new, gated on `inference=dedicated-vllm` AND
   `cluster_access=scoped`): one **deliberately under-tuned** vLLM per student

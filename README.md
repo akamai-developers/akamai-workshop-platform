@@ -166,8 +166,27 @@ cluster_access:   scoped
 ./deploy.sh deploy --config config.yaml      # or --editor jupyter --inference dedicated-vllm ...
 ```
 
-Ready-made compositions live in [`examples/`](examples/). See `config.example.yaml` for the
-full catalog and [`PLAN.md`](PLAN.md) for the design.
+Two ready-made compositions ship in [`examples/`](examples/):
+
+```bash
+# Own-your-inference: jupyter + a dedicated, under-tuned vLLM per student to tune via kubectl
+make deploy ARGS="--config examples/own-inference.yaml"
+
+# SA-agent: jupyter + scoped kubectl + a managed per-student bucket + ship-the-agent capstone
+make deploy ARGS="--config examples/sa-agent.yaml"
+```
+
+Verify without provisioning anything:
+
+```bash
+make verify-default                                  # the default path is byte-identical
+make verify-config CONFIG=examples/own-inference.yaml # a composed config dry-runs cleanly
+```
+
+When `cluster_access: scoped` or `object_storage: managed` is set, each printed access card
+also notes the student's namespace and that their kubeconfig / bucket is pre-wired (no secret
+material on the card). See `config.example.yaml` for the full catalog and [`PLAN.md`](PLAN.md)
+for the design.
 
 ## Cost
 
