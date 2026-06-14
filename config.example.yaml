@@ -22,6 +22,10 @@ region:       us-ord                 # "" → wizard lists live GPU regions (see
 # cluster_access:  none               # none (default) | scoped (per-student ns + kubeconfig + NetworkPolicy)
 # object_storage:  none               # none (default) | managed (per-student bucket + scoped key)
 # agent_deploy:    none               # none (default) | plain (needs cluster_access: scoped). kagent = reserved/v2
+# inference_endpoint: ""              # REQUIRED for inference: external — OpenAI-compatible URL the workshop calls
+# inference_api_key:  ""              # optional bearer key for inference_endpoint (external only)
+# Notes: dedicated-vllm requires cluster_access: scoped (each student's vLLM lives in
+#   their namespace). external deploys NO platform vLLM and provisions zero GPU nodes.
 
 # --- Optional overrides (autopilot fills these from students + model) ---
 # gpu_node_type:        g2-gpu-rtx4000a4-s

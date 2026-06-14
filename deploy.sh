@@ -67,6 +67,8 @@ GPUS_PER_STUDENT=""  # 1 (default); 2 reserved/v2
 CLUSTER_ACCESS=""    # none (default) | scoped
 OBJECT_STORAGE=""    # none (default) | managed
 AGENT_DEPLOY=""      # none (default) | plain; kagent reserved/v2
+INFERENCE_ENDPOINT="" # inference=external only: user-supplied OpenAI-compatible URL
+INFERENCE_API_KEY=""  # inference=external only: bearer key for that endpoint
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -211,6 +213,7 @@ keys = {
  "editor":"EDITOR","workspace_type":"EDITOR","inference":"INFERENCE",
  "gpus_per_student":"GPUS_PER_STUDENT","cluster_access":"CLUSTER_ACCESS",
  "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
+ "inference_endpoint":"INFERENCE_ENDPOINT","inference_api_key":"INFERENCE_API_KEY",
 }
 for raw in open(sys.argv[1]):
     line = raw.split("#",1)[0].rstrip()
@@ -257,6 +260,8 @@ while [[ $# -gt 0 ]]; do
         --cluster-access)    CLUSTER_ACCESS="$2"; shift 2 ;;
         --object-storage)    OBJECT_STORAGE="$2"; shift 2 ;;
         --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
+        --inference-endpoint) INFERENCE_ENDPOINT="$2"; shift 2 ;;
+        --inference-api-key)  INFERENCE_API_KEY="$2"; shift 2 ;;
         -y|--yes)            ASSUME_YES=1; shift ;;
         --dry-run)           DRY_RUN=1; shift ;;
         --list-models)       python3 "${SCRIPTS}/sizing.py" catalog; exit 0 ;;
@@ -498,6 +503,15 @@ esac
 if [[ "$AGENT_DEPLOY" != "none" && "$CLUSTER_ACCESS" != "scoped" ]]; then
     err "agent_deploy='$AGENT_DEPLOY' requires cluster_access='scoped' (the agent ships into the student's namespace)."
 fi
+# dedicated-vllm places one vLLM in each student's namespace, so it needs per-student
+# namespaces (cluster_access=scoped). The helm template gates on both.
+if [[ "$INFERENCE" == "dedicated-vllm" && "$CLUSTER_ACCESS" != "scoped" ]]; then
+    err "inference='dedicated-vllm' requires cluster_access='scoped' (the per-student vLLM lives in the student's namespace)."
+fi
+# external deploys no platform vLLM, so the workshop must point at a real endpoint.
+if [[ "$INFERENCE" == "external" && -z "$INFERENCE_ENDPOINT" ]]; then
+    err "inference='external' requires --inference-endpoint <url> (the OpenAI-compatible endpoint the workshop calls)."
+fi
 
 # When editor=jupyter and the operator hasn't overridden the workspace image, default
 # to the Jupyter image variant (jupyterlab + kubectl baked by build-workspace-image.sh).
@@ -517,8 +531,10 @@ components_nondefault() {
 
 # ---- Sizing (autopilot + any explicit overrides) ----
 if [[ $MULTI_MODEL -eq 0 ]]; then
-    # Single-model path: identical to original.
-    SIZING_ARGS=(plan --students "$STUDENTS" --model "$MODEL" --json)
+    # Single-model path. Component-aware: dedicated-vllm/external reshape the GPU
+    # footprint; shared-vllm + code-server is byte-identical to the original.
+    SIZING_ARGS=(plan --students "$STUDENTS" --model "$MODEL" --json
+        --inference "$INFERENCE" --gpus-per-student "$GPUS_PER_STUDENT" --editor "$EDITOR")
     [[ -n "$GPU_NODE_TYPE" ]] && SIZING_ARGS+=(--gpu-node-type "$GPU_NODE_TYPE")
     [[ -n "$TP" ]]            && SIZING_ARGS+=(--tp "$TP")
     [[ -n "$CPU_NODE_TYPE" ]] && SIZING_ARGS+=(--cpu-node-type "$CPU_NODE_TYPE")
@@ -577,6 +593,7 @@ rule
 echo ""
 if [[ $MULTI_MODEL -eq 0 ]]; then
     python3 "${SCRIPTS}/sizing.py" plan --students "$STUDENTS" --model "$MODEL" \
+        --inference "$INFERENCE" --gpus-per-student "$GPUS_PER_STUDENT" --editor "$EDITOR" \
         ${GPU_NODE_TYPE:+--gpu-node-type "$GPU_NODE_TYPE"} ${TP:+--tp "$TP"} \
         | sed 's/^/  /'
     echo ""
@@ -586,7 +603,14 @@ if [[ $MULTI_MODEL -eq 0 ]]; then
     printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
     printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
     printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
-    printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "${REPLICAS} replica(s), ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (TP=${TP})"
+    # Inference line tracks the component: shared-vllm keeps today's exact text.
+    if [[ "$INFERENCE" == "external" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "external — ${INFERENCE_ENDPOINT}"
+    elif [[ "$INFERENCE" == "dedicated-vllm" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "per-student under-tuned, ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (1 GPU each)"
+    else
+        printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "${REPLICAS} replica(s), ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (TP=${TP})"
+    fi
     printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
     printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
     echo ""
@@ -662,7 +686,9 @@ if interactive; then
                      --editor "$EDITOR" --inference "$INFERENCE" \
                      --gpus-per-student "$GPUS_PER_STUDENT" \
                      --cluster-access "$CLUSTER_ACCESS" \
-                     --object-storage "$OBJECT_STORAGE" --agent-deploy "$AGENT_DEPLOY" ;;
+                     --object-storage "$OBJECT_STORAGE" --agent-deploy "$AGENT_DEPLOY" \
+                     ${INFERENCE_ENDPOINT:+--inference-endpoint "$INFERENCE_ENDPOINT"} \
+                     ${INFERENCE_API_KEY:+--inference-api-key "$INFERENCE_API_KEY"} ;;
             t|T) "${SCRIPTS}/capacity-test.sh" --model "$MODEL" --region "$REGION" \
                      || warn "capacity-test unavailable (added in Phase 6)" ;;
             q|Q)
@@ -914,15 +940,20 @@ GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
     --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY"
     --object-storage "$OBJECT_STORAGE")
-# cluster_access=scoped relocates each workspace into its own namespace, so a
-# same-namespace "vllm" DNS name no longer resolves to the shared vLLM. Point
-# shared-vllm workspaces at the fully-qualified shared service (dedicated-vllm puts
-# a vLLM in the student's own namespace — Phase 5 — so the short name still works).
-if [[ "$CLUSTER_ACCESS" == "scoped" && $MULTI_MODEL -eq 0 && "$INFERENCE" == "shared-vllm" ]]; then
-    GEN_PODS_ARGS+=(--vllm-host "http://vllm.${NAMESPACE}.svc.cluster.local:8000/v1")
-fi
 if [[ $MULTI_MODEL -eq 0 ]]; then
     GEN_PODS_ARGS+=(--model "$MODEL")
+    if [[ "$INFERENCE" == "external" ]]; then
+        # No platform vLLM — point every workspace at the user-supplied endpoint.
+        GEN_PODS_ARGS+=(--vllm-host "$INFERENCE_ENDPOINT")
+        [[ -n "$INFERENCE_API_KEY" ]] && GEN_PODS_ARGS+=(--api-key "$INFERENCE_API_KEY")
+    elif [[ "$CLUSTER_ACCESS" == "scoped" && "$INFERENCE" == "shared-vllm" ]]; then
+        # cluster_access=scoped relocates each workspace into its own namespace, so the
+        # same-namespace "vllm" short name no longer resolves to the shared vLLM. Point
+        # shared-vllm workspaces at the fully-qualified shared service.
+        GEN_PODS_ARGS+=(--vllm-host "http://vllm.${NAMESPACE}.svc.cluster.local:8000/v1")
+    fi
+    # dedicated-vllm puts a `vllm` Service in the student's own namespace, so the
+    # default in-namespace short name (http://vllm:8000/v1) resolves — nothing to set.
 else
     GEN_PODS_ARGS+=(--model "$MODEL" --vllm-host "http://agentgateway:8080/v1"
         --model-names "$MODELS" --api-key "$GATEWAY_API_KEY")

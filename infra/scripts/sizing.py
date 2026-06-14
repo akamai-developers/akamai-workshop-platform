@@ -180,10 +180,32 @@ def _pick_gpu_plan(students, model):
     raise ValueError(f"model needs ~{needed:.0f} GB but no GPU plan is large enough")
 
 
+def _pick_dedicated_plan(model, gpus_per_student):
+    """Smallest GPU plan with exactly gpus_per_student GPUs that fits the model
+    weights — the per-student dedicated vLLM (one student's footprint, not a class)."""
+    model_vram = MODEL_CATALOG[model]["vram_gb"]
+    candidates = [p for p in GPU_PLANS if p["gpus"] == gpus_per_student]
+    if not candidates:
+        raise ValueError(f"no GPU plan has exactly {gpus_per_student} GPU(s)")
+    for plan in candidates:
+        if plan["vram_gb"] >= model_vram + FRAMEWORK_OVERHEAD_GB:
+            return plan
+    raise ValueError(
+        f"model '{model}' (~{model_vram} GB) does not fit on any "
+        f"{gpus_per_student}-GPU plan for dedicated inference"
+    )
+
+
 def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
-         tensor_parallel_size=None, cpu_node_type=None):
+         tensor_parallel_size=None, cpu_node_type=None,
+         inference="shared-vllm", gpus_per_student=1, editor="code-server"):
     """Return a sizing plan dict. Explicit gpu_node_type / tensor_parallel_size
-    override the autopilot (used by the headless e2e smoke test)."""
+    override the autopilot (used by the headless e2e smoke test).
+
+    inference shapes the GPU footprint:
+      * shared-vllm (default) — ~16 students/replica, students/16 GPU nodes.
+      * dedicated-vllm — one under-tuned vLLM per student → students GPU nodes.
+      * external — no platform GPUs; the workshop calls a user-supplied endpoint."""
     if students < 1:
         raise ValueError("students must be >= 1")
     if model not in MODEL_CATALOG:
@@ -191,34 +213,68 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
             f"unknown model '{model}'. Known ungated models:\n  "
             + "\n  ".join(MODEL_CATALOG)
         )
+    if inference not in ("shared-vllm", "dedicated-vllm", "external"):
+        raise ValueError(f"unknown inference '{inference}'")
 
     model_vram = MODEL_CATALOG[model]["vram_gb"]
     kv_gb = round(kv_cache_gb(model, students), 2)
 
-    if gpu_node_type:
-        if gpu_node_type not in GPU_BY_ID:
-            raise ValueError(
-                f"unknown gpu_node_type '{gpu_node_type}'. Known: "
-                + ", ".join(GPU_BY_ID)
-            )
-        plan = GPU_BY_ID[gpu_node_type]
-    else:
-        plan = _pick_gpu_plan(students, model)
-
-    tp = tensor_parallel_size if tensor_parallel_size else plan["gpus"]
-    if tp != plan["gpus"]:
-        raise ValueError(
-            f"tensor_parallel_size={tp} must equal the GPU count of "
-            f"{plan['id']} ({plan['gpus']})"
-        )
-
-    replicas = max(1, math.ceil(students / STUDENTS_PER_NODE))
-    gpu_node_count = replicas
     cpu = CPU_BY_ID(cpu_node_type) if cpu_node_type else CPU_PLAN
     cpu_node_count = max(1, math.ceil(students / STUDENTS_PER_NODE))
+    cpu_cost = cpu_node_count * cpu["hourly"]
+
+    if inference == "external":
+        # No platform GPUs at all — the GPU line is omitted from the preview.
+        gpu_cost = 0.0
+        hourly = round(cpu_cost, 2)
+        return {
+            "students": students, "model": model, "model_slug": slugify(model),
+            "model_vram_gb": model_vram, "kv_cache_gb": kv_gb,
+            "total_vram_gb": round(model_vram + kv_gb + FRAMEWORK_OVERHEAD_GB, 1),
+            "inference": inference, "editor": editor, "gpus_per_student": 0,
+            "gpu_node_type": "none", "gpu_node_count": 0, "gpu_vram_pool_gb": 0,
+            "tensor_parallel_size": 0, "replicas": 0,
+            "cpu_node_type": cpu["id"], "cpu_node_count": cpu_node_count,
+            "gpu_gated": False, "vllm_args": MODEL_CATALOG[model].get("vllm_args", []),
+            "hourly_usd": hourly, "gpu_hourly_usd": 0.0,
+            "cpu_hourly_usd": round(cpu_cost, 2), "cost_4h_usd": round(hourly * 4, 2),
+        }
+
+    if inference == "dedicated-vllm":
+        if gpu_node_type:
+            if gpu_node_type not in GPU_BY_ID:
+                raise ValueError(
+                    f"unknown gpu_node_type '{gpu_node_type}'. Known: "
+                    + ", ".join(GPU_BY_ID))
+            plan = GPU_BY_ID[gpu_node_type]
+        else:
+            plan = _pick_dedicated_plan(model, gpus_per_student)
+        tp = tensor_parallel_size if tensor_parallel_size else gpus_per_student
+        if tp != plan["gpus"]:
+            raise ValueError(
+                f"tensor_parallel_size={tp} must equal the GPU count of "
+                f"{plan['id']} ({plan['gpus']})")
+        # One GPU node per student (each has gpus_per_student GPUs).
+        gpu_node_count = students
+        replicas = students
+    else:  # shared-vllm (today) — unchanged
+        if gpu_node_type:
+            if gpu_node_type not in GPU_BY_ID:
+                raise ValueError(
+                    f"unknown gpu_node_type '{gpu_node_type}'. Known: "
+                    + ", ".join(GPU_BY_ID))
+            plan = GPU_BY_ID[gpu_node_type]
+        else:
+            plan = _pick_gpu_plan(students, model)
+        tp = tensor_parallel_size if tensor_parallel_size else plan["gpus"]
+        if tp != plan["gpus"]:
+            raise ValueError(
+                f"tensor_parallel_size={tp} must equal the GPU count of "
+                f"{plan['id']} ({plan['gpus']})")
+        replicas = max(1, math.ceil(students / STUDENTS_PER_NODE))
+        gpu_node_count = replicas
 
     gpu_cost = gpu_node_count * plan["hourly"]
-    cpu_cost = cpu_node_count * cpu["hourly"]
     hourly = round(gpu_cost + cpu_cost, 2)
 
     return {
@@ -228,6 +284,9 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
         "model_vram_gb": model_vram,
         "kv_cache_gb": kv_gb,
         "total_vram_gb": round(model_vram + kv_gb + FRAMEWORK_OVERHEAD_GB, 1),
+        "inference": inference,
+        "editor": editor,
+        "gpus_per_student": gpus_per_student if inference == "dedicated-vllm" else 0,
         "gpu_node_type": plan["id"],
         "gpu_node_count": gpu_node_count,
         "gpu_vram_pool_gb": plan["vram_gb"],
@@ -253,18 +312,47 @@ def CPU_BY_ID(cid):
 
 def format_plan(p):
     g = " (ACCESS-GATED — may not provision)" if p["gpu_gated"] else ""
-    return (
+    inference = p.get("inference", "shared-vllm")
+    # Workspace label tracks the editor (jupyter renders "workspaces").
+    ws_label = "workspaces" if p.get("editor", "code-server") == "jupyter" else "code-servers"
+    head = (
         f"Model {p['model']}  ·  ~{p['model_vram_gb']} GB weights  ·  ungated\n"
         f"VRAM: {p['model_vram_gb']} GB weights + {p['kv_cache_gb']} GB KV cache + "
         f"{FRAMEWORK_OVERHEAD_GB} GB overhead = ~{p['total_vram_gb']} GB total\n"
-        f"{p['students']} students  →  {p['replicas']} vLLM replica(s)  ·  "
-        f"{p['gpu_node_count']}× {p['gpu_node_type']} "
-        f"(TP={p['tensor_parallel_size']}, {p['gpu_vram_pool_gb']} GB pool each){g}\n"
-        f"                {p['cpu_node_count']}× {p['cpu_node_type']} CPU node(s) "
-        f"(code-servers)\n"
-        f"Est. cost: ~${p['hourly_usd']}/hr  "
-        f"(GPU ${p['gpu_hourly_usd']} + CPU ${p['cpu_hourly_usd']})  ·  "
-        f"~${p['cost_4h_usd']} for a 4-hour class"
+    )
+
+    if inference == "external":
+        # No platform GPUs — omit the GPU node line and the GPU cost term.
+        return (
+            head
+            + f"{p['students']} students  →  external inference endpoint "
+              f"(no platform GPUs)\n"
+            + f"                {p['cpu_node_count']}× {p['cpu_node_type']} CPU node(s) "
+              f"({ws_label})\n"
+            + f"Est. cost: ~${p['hourly_usd']}/hr  (CPU only)  ·  "
+              f"~${p['cost_4h_usd']} for a 4-hour class"
+        )
+
+    if inference == "dedicated-vllm":
+        gpu_line = (
+            f"{p['students']} students  →  {p['gpu_node_count']}× {p['gpu_node_type']} "
+            f"({p['gpus_per_student']} GPU/student, dedicated under-tuned vLLM){g}\n"
+        )
+    else:  # shared-vllm (today) — byte-identical to the original
+        gpu_line = (
+            f"{p['students']} students  →  {p['replicas']} vLLM replica(s)  ·  "
+            f"{p['gpu_node_count']}× {p['gpu_node_type']} "
+            f"(TP={p['tensor_parallel_size']}, {p['gpu_vram_pool_gb']} GB pool each){g}\n"
+        )
+
+    return (
+        head
+        + gpu_line
+        + f"                {p['cpu_node_count']}× {p['cpu_node_type']} CPU node(s) "
+          f"({ws_label})\n"
+        + f"Est. cost: ~${p['hourly_usd']}/hr  "
+          f"(GPU ${p['gpu_hourly_usd']} + CPU ${p['cpu_hourly_usd']})  ·  "
+          f"~${p['cost_4h_usd']} for a 4-hour class"
     )
 
 
@@ -275,6 +363,9 @@ def cmd_plan(args):
         gpu_node_type=args.gpu_node_type,
         tensor_parallel_size=args.tp,
         cpu_node_type=args.cpu_node_type,
+        inference=args.inference,
+        gpus_per_student=args.gpus_per_student,
+        editor=args.editor,
     )
     if args.json:
         print(json.dumps(p, indent=2))
@@ -445,6 +536,28 @@ def cmd_selftest(_args):
           f"{e2e['gpu_node_count']} GPU / {e2e['cpu_node_count']} CPU node")
     ok = ok and e2e_ok
 
+    # dedicated-vllm: one GPU node per student (students×1), not students/16.
+    ded = size(students=12, model="Qwen/Qwen3-4B-Instruct-2507",
+               inference="dedicated-vllm", gpus_per_student=1, editor="jupyter")
+    ded_ok = (ded["gpu_node_count"] == 12 and ded["replicas"] == 12
+              and ded["tensor_parallel_size"] == 1
+              and ded["gpu_node_type"] == "g2-gpu-rtx4000a1-s"
+              and ded["gpu_hourly_usd"] > 0)
+    print(f"  [{'ok' if ded_ok else 'FAIL'}] dedicated-vllm: "
+          f"{ded['gpu_node_count']} GPU nodes for 12 students (1 each)")
+    ok = ok and ded_ok
+
+    # external: zero GPU nodes, GPU cost omitted, CPU nodes still sized.
+    ext = size(students=30, model="Qwen/Qwen3-4B-Instruct-2507",
+               inference="external", editor="jupyter")
+    ext_ok = (ext["gpu_node_count"] == 0 and ext["gpu_hourly_usd"] == 0.0
+              and ext["gpu_node_type"] == "none" and ext["cpu_node_count"] >= 1
+              and "GPU $" not in format_plan(ext)
+              and "(CPU only)" in format_plan(ext))
+    print(f"  [{'ok' if ext_ok else 'FAIL'}] external: "
+          f"{ext['gpu_node_count']} GPU nodes, GPU line omitted from preview")
+    ok = ok and ext_ok
+
     # Multi-model: two-model plan produces valid aggregate.
     m1 = size(students=40, model="Qwen/Qwen3-8B-FP8")
     m2 = size(students=40, model="Qwen/Qwen3-14B-FP8")
@@ -472,6 +585,14 @@ def main():
     pl.add_argument("--tp", type=int, default=None,
                     help="override tensor-parallel size (must equal plan GPU count)")
     pl.add_argument("--cpu-node-type", default=None)
+    pl.add_argument("--inference", default="shared-vllm",
+                    choices=["shared-vllm", "dedicated-vllm", "external"],
+                    help="where the model comes from (default: shared-vllm)")
+    pl.add_argument("--gpus-per-student", type=int, default=1,
+                    help="dedicated-vllm only: GPUs per student (default: 1)")
+    pl.add_argument("--editor", default="code-server",
+                    choices=["code-server", "jupyter"],
+                    help="workspace UI label in the preview (default: code-server)")
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_plan)
 

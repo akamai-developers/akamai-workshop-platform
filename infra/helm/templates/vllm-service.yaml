@@ -1,4 +1,4 @@
-{{- if not .Values.multi_model }}
+{{- if and (not .Values.multi_model) (eq .Values.inference "shared-vllm") }}
 apiVersion: v1
 kind: Service
 metadata:
