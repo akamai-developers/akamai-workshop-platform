@@ -1,0 +1,92 @@
+{{- /*
+cluster_access: scoped — the data-plane fence. A namespace is NOT a network boundary,
+so each student namespace gets its own default-deny-ingress plus narrow allows. This
+stops student A's pods from sending packets to student B's pods (enforced by Cilium on
+LKE; an unenforced CNI makes this silently decorative — see tests/cilium-enforcement-check.sh).
+
+Egress is intentionally left open (policyTypes: [Ingress] only), exactly like the shared
+default-deny policy: in-notebook kubectl tunnels to the API server via egress, so an
+egress rule would break it for no isolation gain (control-plane access is fenced by RBAC).
+
+Gated on cluster_access=scoped; default render is byte-identical (nothing here).
+*/ -}}
+{{- if eq .Values.cluster_access "scoped" }}
+{{- $root := . }}
+{{- range $n := untilStep 1 (int (add .Values.student_count 1)) 1 }}
+{{- $ns := printf "%s-s%02d" $root.Values.namespace $n }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ $ns }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Allow the ingress controller to reach this student's workspace on 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-workspace
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: workspace
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Allow this student's workspace to reach a vLLM in THEIR OWN namespace on 8000
+# (the dedicated-vllm component lands a per-student vLLM here in Phase 5). Harmless
+# when no vLLM pod exists. Cross-namespace vLLM access is never granted here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-workspace-to-vllm
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: vllm
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: workspace
+      ports:
+        - protocol: TCP
+          port: 8000
+{{- if ne $root.Values.agent_deploy "none" }}
+---
+# agent_deploy: the student's deployed agent is reached through the per-student ingress,
+# so allow ingress-nginx -> agent on 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-agent
+  namespace: {{ $ns }}
+spec:
+  podSelector:
+    matchLabels:
+      app: agent
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
+{{- end }}
+{{- end }}

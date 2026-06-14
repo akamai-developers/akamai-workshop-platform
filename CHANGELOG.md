@@ -9,6 +9,40 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 3 — `cluster_access: scoped` + `agent_deploy: plain`
+- **`infra/helm/templates/student-namespaces.yaml`** (gated on `cluster_access=scoped`):
+  per-student `Namespace` (`workshop-sNN`), `student` `ServiceAccount`, and a **namespaced**
+  `Role`/`RoleBinding` — write on workloads + `pods/portforward`/`pods/exec`, **no
+  cluster-scoped verbs**. The control-plane fence.
+- **`infra/helm/templates/student-networkpolicy.yaml`** (gated): per-namespace default-deny
+  ingress + narrow allows (ingress-nginx→workspace, workspace→own-namespace vLLM, and
+  ingress-nginx→agent when `agent_deploy` is set). The data-plane fence. The shared
+  single-namespace policy renders byte-identical when `cluster_access=none`.
+- **`infra/scripts/generate-kubeconfig.sh`** (new): mints a bound, namespace-scoped SA
+  token per student (`kubectl create token`, default 30-day TTL) and emits a
+  `ws-NN-kubeconfig` Secret (default context = the student's namespace). The operator admin
+  kubeconfig is never shipped into a workspace.
+- **`infra/scripts/generate-pods.sh` + `workspace-pod-template.yaml`**: scoped mode places
+  each student's workspace pod, Service, password Secret, startup ConfigMap, and a
+  self-contained Ingress in their own namespace, and mounts the scoped kubeconfig at
+  `~/.kube` (`__KUBECONFIG_MOUNT__`/`__KUBECONFIG_VOLUME__` sentinels, dropped for the
+  default so the pod manifest stays byte-identical). `agent_deploy: plain` emits a
+  per-student agent `Deployment`+`Service` (workspace image + clone-at-startup,
+  `WORKSPACE_TYPE=agent`) behind an `agent-sNN.<host>` ingress. New
+  `--cluster-access`/`--agent-deploy` flags; `OUTPUT_DIR` is overridable for tests.
+- **`startup.sh`**: added a `WORKSPACE_TYPE=agent` launch branch (runs the repo's
+  `run-agent.sh`, else idles) reusing the existing clone-at-startup path.
+- **`deploy.sh`**: threads `--cluster-access`/`--agent-deploy` into `generate-pods.sh`,
+  points scoped + shared-vllm workspaces at the FQDN vLLM service, runs
+  `generate-kubeconfig.sh`, and replicates the wildcard `workshop-tls` secret into each
+  student namespace (per-namespace Ingresses need a co-located cert).
+- **Tests**: `tests/bats/cluster-access.bats` (10 cases — scoped RBAC/NetworkPolicy render,
+  no cluster-scoped verbs, per-namespace generate-pods, agent deployment, scoped kubeconfig
+  via a new `tests/fakes/kubectl`); `tests/phase3-isolation-check.sh` (kind+Cilium
+  allow-then-deny + RBAC-Forbidden proof — **deferred** while host disk is full, ready to
+  run). Verified offline: both goldens hold (pods golden recaptured for the agent branch),
+  helm scoped render passes kubeconform (23/23), 25/25 bats, shellcheck/yamllint clean.
+
 ### Phase 2 — `editor: jupyter`
 - **`infra/images/workspace/startup.sh`**: branched the launch on `WORKSPACE_TYPE`
   (default `code-server`). `jupyter` runs `jupyter lab` on `0.0.0.0:8080` with `$PASSWORD`

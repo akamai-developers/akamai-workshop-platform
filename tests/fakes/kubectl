@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Fake `kubectl` for offline bats tests (generate-kubeconfig.sh). Records calls to
+# $FAKE_KUBECTL_LOG and returns deterministic values for the few read-only / token
+# operations the scripts use. NOT a real cluster.
+set -euo pipefail
+
+if [[ -n "${FAKE_KUBECTL_LOG:-}" ]]; then
+    printf '%s\n' "$*" >> "${FAKE_KUBECTL_LOG}"
+fi
+
+case "$1" in
+    config)
+        shift
+        # config current-context
+        if [[ "${1:-}" == "current-context" ]]; then
+            echo "kind-awp"
+            exit 0
+        fi
+        # config view [--raw] -o jsonpath=...
+        joined="$*"
+        if [[ "$joined" == *"context.cluster"* ]]; then
+            echo "kind-awp"
+        elif [[ "$joined" == *"cluster.server"* ]]; then
+            echo "https://127.0.0.1:6443"
+        elif [[ "$joined" == *"certificate-authority-data"* ]]; then
+            echo "RkFLRS1DQS1EQVRB"   # base64("FAKE-CA-DATA")
+        elif [[ "$joined" == *"certificate-authority"* ]]; then
+            echo ""                    # no file path in tests
+        else
+            echo ""
+        fi
+        exit 0
+        ;;
+    create)
+        # create token <sa> -n <ns> --duration=...
+        ns="default"
+        for ((i=1; i<=$#; i++)); do
+            if [[ "${!i}" == "-n" || "${!i}" == "--namespace" ]]; then
+                j=$((i+1)); ns="${!j}"
+            fi
+        done
+        echo "faketoken.${ns}"
+        exit 0
+        ;;
+    *)
+        # Unhandled verbs succeed silently so scripts don't crash in tests.
+        exit 0
+        ;;
+esac
