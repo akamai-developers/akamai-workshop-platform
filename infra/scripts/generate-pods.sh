@@ -58,6 +58,10 @@ CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
 # plain emits a per-student agent Deployment+Service (workspace image + clone-at-startup,
 # WORKSPACE_TYPE=agent) in the student namespace, fronted by an agent-sNN.<host> ingress.
 AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
+# object_storage component: none (default) | managed. managed wires each workspace's
+# per-student Object Storage Secret (ws-NN-object-storage, provisioned by
+# provision-object-storage.sh) in as envFrom. Default emits NO envFrom (byte-identical).
+OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -74,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --workspace-type) WORKSPACE_TYPE="$2"; shift 2 ;;
         --cluster-access) CLUSTER_ACCESS="$2"; shift 2 ;;
         --agent-deploy) AGENT_DEPLOY="$2"; shift 2 ;;
+        --object-storage) OBJECT_STORAGE="$2"; shift 2 ;;
         --rotate) ROTATE=1; shift ;;
         --shrink) SHRINK=1; shift ;;
         -h|--help)
@@ -92,6 +97,7 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --workspace-type  Editor: code-server (default) | jupyter (sets WORKSPACE_TYPE env)
   --cluster-access  none (default) | scoped — per-student namespace + scoped kubeconfig mount
   --agent-deploy    none (default) | plain — per-student agent Deployment+Service (needs scoped)
+  --object-storage  none (default) | managed — wire per-student object-storage Secret as envFrom
   --rotate          Mint fresh passwords for every student. Required to change --host.
   --shrink          Allow N to be smaller than existing CSV; trimmed entries archived to .bak.
 EOF
@@ -113,6 +119,7 @@ MODEL_NAMES="${MODEL_NAMES:-$MODEL}"
 
 case "${CLUSTER_ACCESS}" in none|scoped) ;; *) echo "ERROR: --cluster-access must be 'none' or 'scoped' (got '${CLUSTER_ACCESS}')" >&2; exit 1 ;; esac
 case "${AGENT_DEPLOY}" in none|plain) ;; *) echo "ERROR: --agent-deploy must be 'none' or 'plain' (got '${AGENT_DEPLOY}')" >&2; exit 1 ;; esac
+case "${OBJECT_STORAGE}" in none|managed) ;; *) echo "ERROR: --object-storage must be 'none' or 'managed' (got '${OBJECT_STORAGE}')" >&2; exit 1 ;; esac
 if [[ "${AGENT_DEPLOY}" != "none" && "${CLUSTER_ACCESS}" != "scoped" ]]; then
     echo "ERROR: --agent-deploy '${AGENT_DEPLOY}' requires --cluster-access scoped (the agent ships into the student namespace)." >&2
     exit 1
@@ -349,7 +356,20 @@ EOF
         -e "s|__CONTENT_REPO__|${CONTENT_REPO}|g" \
         -e "s|__VLLM_API_KEY__|${VLLM_API_KEY}|g" \
         "${TEMPLATE}" \
-      | awk -v wt="${WORKSPACE_TYPE}" -v ca="${CLUSTER_ACCESS}" -v kc="${KCFG_SECRET}" '
+      | awk -v wt="${WORKSPACE_TYPE}" -v ca="${CLUSTER_ACCESS}" -v kc="${KCFG_SECRET}" \
+            -v os="${OBJECT_STORAGE}" -v osname="ws-${PADDED}-object-storage" '
+          /__OBJECT_STORAGE_ENVFROM__/ {
+            # Default (object_storage=none): drop the sentinel (byte-identical output).
+            # managed: pull the per-student object-storage Secret in as envFrom (optional
+            # so a missing Secret never blocks the pod from starting).
+            if (os == "managed") {
+              print "      envFrom:"
+              print "        - secretRef:"
+              print "            name: " osname
+              print "            optional: true"
+            }
+            next
+          }
           /__WORKSPACE_TYPE_ENV__/ {
             # Default code-server: drop the sentinel entirely (byte-identical output).
             # Otherwise emit the WORKSPACE_TYPE env that startup.sh branches on.
@@ -482,6 +502,18 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+EOF
+            # object_storage=managed: the deployed agent reads its durable memory from
+            # the same per-student bucket Secret as the workspace (optional → never blocks).
+            if [[ "${OBJECT_STORAGE}" == "managed" ]]; then
+                cat >> "${MANIFESTS_TMP}" << EOF
+          envFrom:
+            - secretRef:
+                name: ws-${PADDED}-object-storage
+                optional: true
+EOF
+            fi
+            cat >> "${MANIFESTS_TMP}" << EOF
           env:
             - name: WORKSPACE_TYPE
               value: "agent"

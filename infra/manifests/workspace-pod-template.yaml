@@ -25,6 +25,7 @@ spec:
       ports:
         - containerPort: 8080
           name: http
+__OBJECT_STORAGE_ENVFROM__
       env:
 __WORKSPACE_TYPE_ENV__
         - name: PASSWORD
