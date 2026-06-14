@@ -46,6 +46,9 @@ CONTENT_REPO="${CONTENT_REPO:-}"
 # harmless default when the endpoint has no auth; set to the real key when the
 # agentgateway enforces apiKeyAuthentication.
 VLLM_API_KEY="${VLLM_API_KEY:-not-needed}"
+# editor component: code-server (default) | jupyter. Threaded into the pod's
+# WORKSPACE_TYPE env, which startup.sh branches on. Default emits NO env (byte-identical).
+WORKSPACE_TYPE="${WORKSPACE_TYPE:-code-server}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --vllm-host) VLLM_HOST="$2"; shift 2 ;;
         --content-repo) CONTENT_REPO="$2"; shift 2 ;;
         --api-key) VLLM_API_KEY="$2"; shift 2 ;;
+        --workspace-type) WORKSPACE_TYPE="$2"; shift 2 ;;
         --rotate) ROTATE=1; shift ;;
         --shrink) SHRINK=1; shift ;;
         -h|--help)
@@ -74,6 +78,7 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --vllm-host       VLLM_HOST env stamped into each workspace (default: http://vllm:8000/v1)
   --content-repo    CONTENT_REPO env (git repo cloned at pod startup; "" → default)
   --api-key         VLLM_API_KEY env (sent as Bearer to the gateway; "not-needed" if no auth)
+  --workspace-type  Editor: code-server (default) | jupyter (sets WORKSPACE_TYPE env)
   --rotate          Mint fresh passwords for every student. Required to change --host.
   --shrink          Allow N to be smaller than existing CSV; trimmed entries archived to .bak.
 EOF
@@ -281,7 +286,19 @@ EOF
         -e "s|__MODEL_NAMES__|${MODEL_NAMES}|g" \
         -e "s|__CONTENT_REPO__|${CONTENT_REPO}|g" \
         -e "s|__VLLM_API_KEY__|${VLLM_API_KEY}|g" \
-        "${TEMPLATE}" >> "${MANIFESTS_TMP}"
+        "${TEMPLATE}" \
+      | awk -v wt="${WORKSPACE_TYPE}" '
+          /__WORKSPACE_TYPE_ENV__/ {
+            # Default code-server: drop the sentinel entirely (byte-identical output).
+            # Otherwise emit the WORKSPACE_TYPE env that startup.sh branches on.
+            if (wt != "code-server") {
+              print "        - name: WORKSPACE_TYPE"
+              print "          value: \"" wt "\""
+            }
+            next
+          }
+          { print }' \
+        >> "${MANIFESTS_TMP}"
     echo "---" >> "${MANIFESTS_TMP}"
 
     cat >> "${INGRESS_TMP}" << EOF

@@ -1,0 +1,29 @@
+# Jupyter workspace image variant for akamai-workshop-platform (editor: jupyter).
+# Bakes jupyterlab + python + git + kubectl; bakes NO workshop content (cloned at
+# pod startup by startup.sh from $CONTENT_REPO, same as the code-server image).
+# kubectl is on PATH so the cluster_access: scoped component gives in-notebook kubectl.
+# Build with:  VARIANT=jupyter infra/scripts/build-workspace-image.sh
+FROM python:3.12-slim
+
+# kubectl (for cluster_access), git + curl (for clone-at-startup + uv).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git curl ca-certificates \
+ && KVER="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
+ && curl -fsSL "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl \
+ && chmod +x /usr/local/bin/kubectl \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir jupyterlab
+
+# Match the code-server image's non-root coder user (UID 1000, HOME /home/coder):
+# startup.sh defaults WORKSPACE_DIR to $HOME/workshop and the pod runs as UID 1000.
+RUN useradd -m -u 1000 -s /bin/bash coder
+USER coder
+WORKDIR /home/coder
+
+# The clone-at-startup script is the entrypoint — the same script the code-server
+# image and the ConfigMap path use; it branches on WORKSPACE_TYPE=jupyter.
+COPY startup.sh /usr/local/bin/startup.sh
+
+EXPOSE 8080
+ENTRYPOINT ["/bin/bash", "/usr/local/bin/startup.sh"]

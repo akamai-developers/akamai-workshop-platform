@@ -499,6 +499,15 @@ if [[ "$AGENT_DEPLOY" != "none" && "$CLUSTER_ACCESS" != "scoped" ]]; then
     err "agent_deploy='$AGENT_DEPLOY' requires cluster_access='scoped' (the agent ships into the student's namespace)."
 fi
 
+# When editor=jupyter and the operator hasn't overridden the workspace image, default
+# to the Jupyter image variant (jupyterlab + kubectl baked by build-workspace-image.sh).
+# code-server keeps the stock default, so the default path is unchanged.
+DEFAULT_CODE_SERVER_IMAGE="codercom/code-server:latest"
+DEFAULT_JUPYTER_IMAGE="ghcr.io/akamai-developers/ai-agents-workspace-jupyter:latest"
+if [[ "$EDITOR" == "jupyter" && "$WORKSPACE_IMAGE" == "$DEFAULT_CODE_SERVER_IMAGE" ]]; then
+    WORKSPACE_IMAGE="$DEFAULT_JUPYTER_IMAGE"
+fi
+
 # True when the requested composition differs from the default platform shape.
 components_nondefault() {
     [[ "$EDITOR" != "code-server" || "$INFERENCE" != "shared-vllm" \
@@ -902,7 +911,7 @@ printf '%b\n' "  ${BOLD}Generating ${STUDENTS} student workspaces${RESET}"
 rule
 GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --namespace "$NAMESPACE" --image "$WORKSPACE_IMAGE"
-    --content-repo "$CONTENT_REPO")
+    --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO")
 if [[ $MULTI_MODEL -eq 0 ]]; then
     GEN_PODS_ARGS+=(--model "$MODEL")
 else
