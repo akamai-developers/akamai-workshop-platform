@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Fake `linode-cli` for offline bats tests. Records every invocation to
+# $FAKE_LINODE_LOG and emits canned JSON/text so provisioning + teardown logic
+# can be exercised with no Linode account. Behaviour is driven by env vars the
+# tests set, so a single fake covers create / list / delete / error paths.
+#
+# Supported (extend as phases need): object-storage clusters-list, buckets-list,
+# keys-list, keys-create, keys-delete, and `obj` mb/rb. Unknown subcommands exit 0
+# with empty output (so callers that probe optional features don't crash).
+set -euo pipefail
+
+LOG="${FAKE_LINODE_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "$LOG"
+
+# Force a specific exit code / stderr to simulate API errors (e.g. the 400/500
+# the real CLI returns for a bad --regions value).
+if [[ -n "${FAKE_LINODE_FAIL:-}" ]]; then
+  echo "${FAKE_LINODE_STDERR:-fake linode-cli forced failure}" >&2
+  exit "${FAKE_LINODE_FAIL}"
+fi
+
+emit() { printf '%s' "$1"; }
+
+case "$1 ${2:-}" in
+  "object-storage clusters-list")
+    # region column is the REGION id (us-iad), distinct from cluster id (us-iad-1).
+    emit "${FAKE_OBJ_CLUSTERS:-[{\"id\":\"us-ord-1\",\"region\":\"us-ord\",\"status\":\"available\"}]}"
+    ;;
+  "object-storage buckets-list")
+    emit "${FAKE_OBJ_BUCKETS:-[]}"
+    ;;
+  "object-storage keys-list")
+    emit "${FAKE_OBJ_KEYS:-[]}"
+    ;;
+  "object-storage keys-create")
+    # Mint a deterministic fake key pair so Secret emission is testable.
+    emit "${FAKE_OBJ_KEY_CREATE:-[{\"id\":4242,\"access_key\":\"FAKEACCESS\",\"secret_key\":\"FAKESECRET\"}]}"
+    ;;
+  "object-storage keys-delete")
+    emit ""
+    ;;
+  *)
+    emit "${FAKE_LINODE_DEFAULT_OUT:-}"
+    ;;
+esac
