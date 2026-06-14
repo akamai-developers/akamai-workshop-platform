@@ -58,6 +58,15 @@ NAMESPACE="workshop"
 WORKSPACE_IMAGE="codercom/code-server:latest"
 MAX_MODEL_LEN="32768"
 GPU_MEMORY_UTIL="0.9"
+# Component catalog (PLAN.md). Empty here; defaults applied after parsing so a
+# config/flag can set them. Every default equals today's behavior — a deploy that
+# sets none of these is byte-identical to the original platform.
+EDITOR=""            # code-server (default) | jupyter
+INFERENCE=""         # shared-vllm (default) | dedicated-vllm | external
+GPUS_PER_STUDENT=""  # 1 (default); 2 reserved/v2
+CLUSTER_ACCESS=""    # none (default) | scoped
+OBJECT_STORAGE=""    # none (default) | managed
+AGENT_DEPLOY=""      # none (default) | plain; kagent reserved/v2
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -198,6 +207,10 @@ keys = {
  "label":"LABEL","k8s_version":"K8S_VERSION","subdomain_prefix":"SUBDOMAIN_PREFIX",
  "cert_email":"CERT_EMAIL","allowed_cidr":"ALLOWED_CIDR","namespace":"NAMESPACE",
  "workspace_image":"WORKSPACE_IMAGE","max_model_len":"MAX_MODEL_LEN","gpu_memory_util":"GPU_MEMORY_UTIL",
+ # Component catalog (editor accepts the legacy alias workspace_type too).
+ "editor":"EDITOR","workspace_type":"EDITOR","inference":"INFERENCE",
+ "gpus_per_student":"GPUS_PER_STUDENT","cluster_access":"CLUSTER_ACCESS",
+ "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
 }
 for raw in open(sys.argv[1]):
     line = raw.split("#",1)[0].rstrip()
@@ -238,6 +251,12 @@ while [[ $# -gt 0 ]]; do
         --workspace-image)   WORKSPACE_IMAGE="$2"; shift 2 ;;
         --max-model-len)     MAX_MODEL_LEN="$2"; shift 2 ;;
         --gpu-memory-util)   GPU_MEMORY_UTIL="$2"; shift 2 ;;
+        --editor|--workspace-type) EDITOR="$2"; shift 2 ;;
+        --inference)         INFERENCE="$2"; shift 2 ;;
+        --gpus-per-student)  GPUS_PER_STUDENT="$2"; shift 2 ;;
+        --cluster-access)    CLUSTER_ACCESS="$2"; shift 2 ;;
+        --object-storage)    OBJECT_STORAGE="$2"; shift 2 ;;
+        --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
         -y|--yes)            ASSUME_YES=1; shift ;;
         --dry-run)           DRY_RUN=1; shift ;;
         --list-models)       python3 "${SCRIPTS}/sizing.py" catalog; exit 0 ;;
@@ -443,6 +462,50 @@ case "$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')" in
     no|n|none|false|off) DOMAIN="" ;;
 esac
 
+# ---- Component catalog: defaults (= today's behavior) + validation ----
+# Every default below is the original platform's shape, so a deploy with no
+# component flags is byte-identical to today. Reserved/v2 values are rejected
+# with a clear message rather than silently doing nothing.
+EDITOR="${EDITOR:-code-server}"
+INFERENCE="${INFERENCE:-shared-vllm}"
+GPUS_PER_STUDENT="${GPUS_PER_STUDENT:-1}"
+CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
+OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
+AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
+
+case "$EDITOR" in code-server|jupyter) ;; *) err "editor must be 'code-server' or 'jupyter' (got '$EDITOR')" ;; esac
+case "$INFERENCE" in
+    shared-vllm|dedicated-vllm|external) ;;
+    *) err "inference must be 'shared-vllm', 'dedicated-vllm', or 'external' (got '$INFERENCE')" ;;
+esac
+case "$CLUSTER_ACCESS" in none|scoped) ;; *) err "cluster_access must be 'none' or 'scoped' (got '$CLUSTER_ACCESS')" ;; esac
+case "$OBJECT_STORAGE" in
+    none|managed) ;;
+    own-account) err "object_storage 'own-account' is reserved for v2 and not implemented yet." ;;
+    *) err "object_storage must be 'none' or 'managed' (got '$OBJECT_STORAGE')" ;;
+esac
+case "$AGENT_DEPLOY" in
+    none|plain) ;;
+    kagent) err "agent_deploy 'kagent' is reserved for v2 (Agent CRD + controller not built yet). Use 'plain'." ;;
+    *) err "agent_deploy must be 'none' or 'plain' (got '$AGENT_DEPLOY')" ;;
+esac
+case "$GPUS_PER_STUDENT" in
+    1) ;;
+    2) err "gpus_per_student '2' is reserved for v2 (two-models + agentgateway routing). Use 1." ;;
+    *) err "gpus_per_student must be 1 (got '$GPUS_PER_STUDENT')" ;;
+esac
+# Dependencies (PLAN.md): shipping an agent needs a namespace to ship into.
+if [[ "$AGENT_DEPLOY" != "none" && "$CLUSTER_ACCESS" != "scoped" ]]; then
+    err "agent_deploy='$AGENT_DEPLOY' requires cluster_access='scoped' (the agent ships into the student's namespace)."
+fi
+
+# True when the requested composition differs from the default platform shape.
+components_nondefault() {
+    [[ "$EDITOR" != "code-server" || "$INFERENCE" != "shared-vllm" \
+       || "$CLUSTER_ACCESS" != "none" || "$OBJECT_STORAGE" != "none" \
+       || "$AGENT_DEPLOY" != "none" ]]
+}
+
 # ---- Sizing (autopilot + any explicit overrides) ----
 if [[ $MULTI_MODEL -eq 0 ]]; then
     # Single-model path: identical to original.
@@ -535,6 +598,26 @@ else
     echo ""
 fi
 
+# ---- Component composition (only when it differs from the default shape, so the
+#      default deploy's preview stays byte-identical to the original platform) ----
+if components_nondefault; then
+    echo ""
+    rule
+    printf '%b\n' "  ${BOLD}Components${RESET}"
+    rule
+    echo ""
+    printf "  ${DIM}%-14s${RESET} %s\n" "Editor:"     "$EDITOR"
+    if [[ "$INFERENCE" == "dedicated-vllm" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "dedicated-vllm (${GPUS_PER_STUDENT} GPU/student, under-tuned)"
+    else
+        printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "$INFERENCE"
+    fi
+    printf "  ${DIM}%-14s${RESET} %s\n" "Cluster acc.:" "$CLUSTER_ACCESS"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Object store:" "$OBJECT_STORAGE"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Agent deploy:" "$AGENT_DEPLOY"
+    echo ""
+fi
+
 # ---- Dry run stops here, writing nothing ----
 if [[ $DRY_RUN -eq 1 ]]; then
     echo ""
@@ -562,9 +645,15 @@ if interactive; then
                 echo ""
                 printf '%b' "  ${BOLD}Students:${RESET} "; read -r STUDENTS
                 printf '%b' "  ${BOLD}Model(s):${RESET} "; read -r MODELS
+                # Re-exec preserves the component composition (config-only flags the
+                # wizard never prompts for) so "Change sizing" doesn't silently reset it.
                 exec "$0" deploy --students "$STUDENTS" --model "$MODELS" \
                      --label "$LABEL" --domain "$DOMAIN" --region "$REGION" \
-                     ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} ;;
+                     ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} \
+                     --editor "$EDITOR" --inference "$INFERENCE" \
+                     --gpus-per-student "$GPUS_PER_STUDENT" \
+                     --cluster-access "$CLUSTER_ACCESS" \
+                     --object-storage "$OBJECT_STORAGE" --agent-deploy "$AGENT_DEPLOY" ;;
             t|T) "${SCRIPTS}/capacity-test.sh" --model "$MODEL" --region "$REGION" \
                      || warn "capacity-test unavailable (added in Phase 6)" ;;
             q|Q)
@@ -711,6 +800,20 @@ EOF
 fi
 ok "Wrote ${TFVARS_OUT}"
 
+# Component composition, written into the helm overrides so the templates/scripts
+# added in later phases can consume it. Always emitted; every value defaults to
+# today's behavior, and templates gate on "differs from default", so the default
+# render is unchanged.
+COMPONENTS_YAML="$(cat <<EOF
+editor: ${EDITOR}
+inference: ${INFERENCE}
+gpus_per_student: ${GPUS_PER_STUDENT}
+cluster_access: ${CLUSTER_ACCESS}
+object_storage: ${OBJECT_STORAGE}
+agent_deploy: ${AGENT_DEPLOY}
+EOF
+)"
+
 # ---- Write Helm overrides (merged over infra/helm/values.yaml) ----
 if [[ $MULTI_MODEL -eq 0 ]]; then
     # Single-model: write model-specific vllm_extra_args from the sizing plan.
@@ -732,6 +835,7 @@ max_model_len: ${MAX_MODEL_LEN}
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 content_repo: "${CONTENT_REPO}"
+${COMPONENTS_YAML}
 hf_token: ""
 vllm_extra_args:
 ${VLLM_ARGS_YAML}
@@ -773,6 +877,7 @@ workspace_image: ${WORKSPACE_IMAGE}
 vllm_host: http://agentgateway:8080/v1
 content_repo: "${CONTENT_REPO}"
 gateway_api_key: "${GATEWAY_API_KEY}"
+${COMPONENTS_YAML}
 hf_token: ""
 EOF
 fi

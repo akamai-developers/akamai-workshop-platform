@@ -50,7 +50,7 @@ and removes the abuse/cost surface. A public inference endpoint is an explicit n
 
 ## Access control
 
-- Each workspace gets a unique random password (`openssl rand -hex 4`), stored as a
+- Each workspace gets a unique random password (`openssl rand -hex 16`), stored as a
   Kubernetes Secret and injected via env.
 - Students receive passwords on printed access cards — no shared credentials.
 - No SSH to nodes or pods — code-server over HTTPS only.
