@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased — Component-based workshops (`feat/jupyter-own-inference`)
+
+Extending the platform additively, behind flags that default to today's behaviour, so
+one classroom machinery composes multiple workshop shapes (PLAN.md). The default
+`code-server` + `shared-vllm` path stays byte-identical.
+
+### Phase 0 — Build environment + guardrails (no product code)
+- **`.build/golden/`**: captured the default-behaviour baselines BEFORE any component
+  keys exist — `default-helm.yaml` (`helm template infra/helm`) and
+  `default-pods.masked.yaml` (a deterministic `generate-pods.sh -n 2 --host fixed.example`
+  render with random passwords masked). These are the #1 regression gate.
+- **`tests/`**: offline test harness — `fakes/linode-cli` + `fakes/curl` shims (log
+  invocations, simulate API errors), `bats/helper.bash` + `bats/smoke.bats`,
+  `kind-cluster.yaml` (Cilium CNI + kube-proxy replacement, mirroring LKE), and
+  `cilium-enforcement-check.sh` (positive-control allow-then-deny NetworkPolicy proof).
+- **`.yamllint.yaml`**: lint config matching the repo's existing YAML style.
+- **`infra/docs/dev.md`**: toolchain setup, the offline gate commands, kind+Cilium usage,
+  and how to recapture the golden snapshots.
+
 ## 2026-06-08 — Multi-model support with agentgateway routing
 
 Added multi-model deployment support: instructors can select 2+ models (comma-separated),
