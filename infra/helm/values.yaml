@@ -61,3 +61,31 @@ gateway_api_key: ""
 workspace_image: ghcr.io/akamai-developers/ai-agents-workspace:latest
 vllm_host: http://vllm:8000/v1
 content_repo: ""   # "" → default ai-agents-workshop (resolved by startup.sh)
+
+# --- Component catalog (PLAN.md) ---
+# A workshop is a *composition* of these per-student components, selected once per
+# classroom by the operator. EVERY default below is today's behavior, so a deploy
+# with none of these set renders byte-identically to the original platform. New
+# behavior is added behind these flags (the multi_model switch above is the
+# precedent). Templates/scripts MUST gate on "differs from default" so the default
+# path never changes.
+#
+# editor: the workspace UI. code-server (today) | jupyter.
+editor: code-server
+# inference: where the model comes from.
+#   shared-vllm (today, ~16 students/replica) | dedicated-vllm (one under-tuned vLLM
+#   per student on their own GPU) | external (no platform vLLM; bring your own endpoint).
+inference: shared-vllm
+# gpus_per_student: only meaningful when inference=dedicated-vllm. 1 (default).
+#   2 is RESERVED for v2 (two-models + agentgateway routing) — not built yet.
+gpus_per_student: 1
+# cluster_access: none (today) | scoped (per-student namespace + scoped kubeconfig +
+#   per-namespace NetworkPolicy). "scoped" is what gives students in-notebook kubectl.
+cluster_access: none
+# object_storage: none (today) | managed (per-student bucket + bucket-scoped key).
+#   own-account is RESERVED for v2.
+object_storage: none
+# agent_deploy: ship-the-agent-to-k8s capability (requires cluster_access=scoped).
+#   none (today) | plain (Deployment+Service behind the per-student ingress).
+#   kagent is RESERVED for v2 (Agent CRD + controller) — enum value only, no code.
+agent_deploy: none

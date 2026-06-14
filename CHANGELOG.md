@@ -9,6 +9,24 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 1 — Component flags + config plumbing
+- **`infra/helm/values.yaml`**: added the component catalog keys (`editor`, `inference`,
+  `gpus_per_student`, `cluster_access`, `object_storage`, `agent_deploy`), each defaulting
+  to today's behavior. No template references them yet, so the default render is unchanged.
+- **`deploy.sh`**: `load_config` allowlist + arg parser now accept the component keys
+  (`--editor`/`--workspace-type`, `--inference`, `--gpus-per-student`, `--cluster-access`,
+  `--object-storage`, `--agent-deploy`). Added enum + dependency validation (reserved
+  values `kagent` / `gpus_per_student: 2` / `own-account` are rejected with a clear v2
+  message; `agent_deploy` requires `cluster_access: scoped`). The deploy preview gained a
+  **Components** block shown only when the composition differs from default — so the default
+  dry-run plan is byte-identical. "Change sizing" re-exec now preserves the components, and
+  the generated helm overrides carry them for later phases.
+- **`config.example.yaml`**: documented the component catalog; fixed the stale "5 questions"
+  header (the wizard is 6 steps).
+- **`infra/docs/security.md`**: fixed `openssl rand -hex 4` → `-hex 16` (matches the script).
+- **`README.md`**: added a Component model section.
+- **`tests/bats/components.bats`**: round-trip + validation gates (all offline via dry-run).
+
 ### Phase 0 — Build environment + guardrails (no product code)
 - **`.build/golden/`**: captured the default-behaviour baselines BEFORE any component
   keys exist — `default-helm.yaml` (`helm template infra/helm`) and

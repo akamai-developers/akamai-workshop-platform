@@ -137,6 +137,38 @@ kubectl -n workshop get agentgatewaybackends   # from the cluster
 !!! note
     The workshop uses a single shared key, which is fine for a time-boxed class. For production, issue one key per identity and add key rotation.
 
+## Component model
+
+The five inputs above provision the **default** workshop shape: a browser code-server
+per student plus one shared vLLM endpoint. Different workshops are composed from a
+catalog of independent, per-student **components** — selected once per classroom in the
+config file (the interactive wizard never prompts for them). Every component defaults to
+today's behavior, so a deploy that sets none of them is byte-identical to the original
+platform.
+
+| Component | Values (default first) | Controls |
+|---|---|---|
+| `editor` | `code-server` \| `jupyter` | The workspace UI |
+| `inference` | `shared-vllm` \| `dedicated-vllm` \| `external` | Where the model comes from |
+| `gpus_per_student` | `1` | GPUs for `dedicated-vllm` (2 reserved for v2) |
+| `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |
+| `object_storage` | `none` \| `managed` | Per-student bucket + bucket-scoped key |
+| `agent_deploy` | `none` \| `plain` | Ship the student's agent to their namespace (requires `cluster_access: scoped`) |
+
+```yaml
+# config.yaml — an "own your inference" workshop
+editor:           jupyter
+inference:        dedicated-vllm
+cluster_access:   scoped
+```
+
+```bash
+./deploy.sh deploy --config config.yaml      # or --editor jupyter --inference dedicated-vllm ...
+```
+
+Ready-made compositions live in [`examples/`](examples/). See `config.example.yaml` for the
+full catalog and [`PLAN.md`](PLAN.md) for the design.
+
 ## Cost
 
 GPU nodes bill by the hour, and the wizard prints an estimate before you confirm. A typical 80-student class (`Qwen3-8B-FP8` on 5 `g2-gpu-rtx4000a4-s` GPU nodes plus 5 CPU nodes) costs roughly **$15.88/hr**, or about $64 for a 4-hour class. A single-GPU capacity-probe box (one `g2-gpu-rtx4000a1-s` GPU node plus one CPU node) costs about $0.74/hr.
