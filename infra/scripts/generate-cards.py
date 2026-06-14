@@ -72,6 +72,8 @@ HTML_HEAD = """<!doctype html>
                font-size: 10pt; background: #f6f6f6; padding: 5px 9px;
                border-radius: 4px; word-break: break-all; text-align: center;
                max-width: 100%; box-sizing: border-box; }
+  .card .wired { font-size: 8pt; color: #444; margin-top: 4px; text-align: center;
+                 word-break: break-all; max-width: 100%; }
   .note { padding: 10px 16px; color: #666; font-size: 10pt; }
   @media print { .note { display: none; } }
 </style>
@@ -80,6 +82,33 @@ HTML_HEAD = """<!doctype html>
 <div class="note">Tip: print double-sided OFF, then cut along dashed lines.
 Each page has 8 cards.</div>
 """
+
+
+def _detect_composition(here: Path):
+    """Read cluster_access/object_storage/namespace from the generated helm-values.yaml
+    (best-effort, no YAML dep). Used only for a NON-SECRET 'pre-wired' card note;
+    absent file → none/none → cards are unchanged."""
+    hv = here.parent / "manifests" / "helm-values.yaml"
+    vals = {"cluster_access": "none", "object_storage": "none", "namespace": "workshop"}
+    try:
+        for line in hv.read_text().splitlines():
+            for k in vals:
+                if line.startswith(k + ":"):
+                    vals[k] = line.split(":", 1)[1].strip() or vals[k]
+    except OSError:
+        pass
+    return vals
+
+
+def _wired_note(num, comp):
+    """Non-secret pre-wired note for a card (namespace + what's pre-wired), or ''."""
+    scoped = comp["cluster_access"] == "scoped"
+    managed = comp["object_storage"] == "managed"
+    if not (scoped or managed):
+        return ""
+    parts = (["kubeconfig"] if scoped else []) + (["bucket"] if managed else [])
+    return (f'<div class="wired">ns {comp["namespace"]}-{num} · '
+            f'{" + ".join(parts)} ready</div>')
 
 
 def main() -> int:
@@ -91,6 +120,7 @@ def main() -> int:
     parser.add_argument("--csv", default=str(default_csv))
     parser.add_argument("--out", default=str(default_out))
     args = parser.parse_args()
+    comp = _detect_composition(here)
 
     csv_path = Path(args.csv).resolve()
     out_path = Path(args.out).resolve()
@@ -120,6 +150,7 @@ def main() -> int:
                 f'<div class="url">{url}</div>'
                 '<div class="label">password</div>'
                 f'<div class="pw">{pw}</div>'
+                f'{_wired_note(n, comp)}'
                 '</div>'
             )
         html.append("</div>")

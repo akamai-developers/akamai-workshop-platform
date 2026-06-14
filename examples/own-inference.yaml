@@ -1,0 +1,28 @@
+# Own-your-inference workshop — each student runs and TUNES their own vLLM on a
+# dedicated GPU, editing manifests and applying them with kubectl from a notebook.
+#
+#   export TF_VAR_token=...
+#   make deploy ARGS="--yes --config examples/own-inference.yaml"
+#   # or:  ./deploy.sh deploy --yes --config examples/own-inference.yaml
+#
+# Anything omitted is filled by the wizard's autopilot. Flags override these.
+# GPU STOCK is the #1 constraint here: this provisions one GPU per student in ONE
+# region — reserve capacity ahead and run `infra/scripts/regions.sh preflight`.
+
+students:     12
+model:        Qwen/Qwen3-4B-Instruct-2507   # small model so a 1-GPU plan fits; see `sizing.py catalog`
+content_repo: ""                            # point at the own-inference lessons repo
+domain:       ""                            # "" → sslip.io + self-signed TLS
+region:       us-ord
+
+# --- Components (config-only; the wizard never prompts for these) ---
+editor:           jupyter          # students edit + apply manifests from a notebook
+inference:        dedicated-vllm   # one DELIBERATELY under-tuned vLLM per student to fix
+gpus_per_student: 1                # 1 GPU each (g2-gpu-rtx4000a1-s auto-picked). 2 = v2
+cluster_access:   scoped           # REQUIRED by dedicated-vllm: per-student namespace + scoped kubeconfig + NetworkPolicy
+agent_deploy:     plain            # capstone: ship the tuned setup as a Deployment+Service
+object_storage:   none
+
+# The per-student vLLM ships under-tuned on purpose (helm values
+# dedicated_gpu_memory_util: 0.4, dedicated_max_model_len: 2048). Raising those —
+# and proving it with the /metrics helper — is the workshop.
