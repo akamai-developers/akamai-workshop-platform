@@ -62,10 +62,12 @@ __WORKSPACE_TYPE_ENV__
         - name: startup
           mountPath: /workshop-scripts
           readOnly: true
+__KUBECONFIG_MOUNT__
   volumes:
     - name: startup
       configMap:
         name: workspace-startup
+__KUBECONFIG_VOLUME__
   restartPolicy: Always
 ---
 apiVersion: v1

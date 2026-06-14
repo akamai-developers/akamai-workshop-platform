@@ -12,7 +12,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${INFRA_DIR}/manifests/generated"
+# Overridable so tests can render into an isolated dir (default: the gitignored generated/).
+OUTPUT_DIR="${OUTPUT_DIR:-${INFRA_DIR}/manifests/generated}"
 TEMPLATE="${INFRA_DIR}/manifests/workspace-pod-template.yaml"
 STARTUP_SCRIPT="${INFRA_DIR}/images/workspace/startup.sh"
 
@@ -49,6 +50,14 @@ VLLM_API_KEY="${VLLM_API_KEY:-not-needed}"
 # editor component: code-server (default) | jupyter. Threaded into the pod's
 # WORKSPACE_TYPE env, which startup.sh branches on. Default emits NO env (byte-identical).
 WORKSPACE_TYPE="${WORKSPACE_TYPE:-code-server}"
+# cluster_access component: none (default) | scoped. In scoped mode each student's
+# workspace + ingress + secret + startup ConfigMap land in their OWN namespace
+# (<namespace>-sNN), and a per-student scoped kubeconfig Secret is mounted at ~/.kube.
+CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
+# agent_deploy component: none (default) | plain. Only meaningful with cluster_access=scoped.
+# plain emits a per-student agent Deployment+Service (workspace image + clone-at-startup,
+# WORKSPACE_TYPE=agent) in the student namespace, fronted by an agent-sNN.<host> ingress.
+AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -63,6 +72,8 @@ while [[ $# -gt 0 ]]; do
         --content-repo) CONTENT_REPO="$2"; shift 2 ;;
         --api-key) VLLM_API_KEY="$2"; shift 2 ;;
         --workspace-type) WORKSPACE_TYPE="$2"; shift 2 ;;
+        --cluster-access) CLUSTER_ACCESS="$2"; shift 2 ;;
+        --agent-deploy) AGENT_DEPLOY="$2"; shift 2 ;;
         --rotate) ROTATE=1; shift ;;
         --shrink) SHRINK=1; shift ;;
         -h|--help)
@@ -79,6 +90,8 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --content-repo    CONTENT_REPO env (git repo cloned at pod startup; "" → default)
   --api-key         VLLM_API_KEY env (sent as Bearer to the gateway; "not-needed" if no auth)
   --workspace-type  Editor: code-server (default) | jupyter (sets WORKSPACE_TYPE env)
+  --cluster-access  none (default) | scoped — per-student namespace + scoped kubeconfig mount
+  --agent-deploy    none (default) | plain — per-student agent Deployment+Service (needs scoped)
   --rotate          Mint fresh passwords for every student. Required to change --host.
   --shrink          Allow N to be smaller than existing CSV; trimmed entries archived to .bak.
 EOF
@@ -97,6 +110,24 @@ fi
 
 # Default MODEL_NAMES to MODEL if not set.
 MODEL_NAMES="${MODEL_NAMES:-$MODEL}"
+
+case "${CLUSTER_ACCESS}" in none|scoped) ;; *) echo "ERROR: --cluster-access must be 'none' or 'scoped' (got '${CLUSTER_ACCESS}')" >&2; exit 1 ;; esac
+case "${AGENT_DEPLOY}" in none|plain) ;; *) echo "ERROR: --agent-deploy must be 'none' or 'plain' (got '${AGENT_DEPLOY}')" >&2; exit 1 ;; esac
+if [[ "${AGENT_DEPLOY}" != "none" && "${CLUSTER_ACCESS}" != "scoped" ]]; then
+    echo "ERROR: --agent-deploy '${AGENT_DEPLOY}' requires --cluster-access scoped (the agent ships into the student namespace)." >&2
+    exit 1
+fi
+
+# Namespace a given padded student id lands in. Default mode: the single shared
+# namespace (byte-identical to today). Scoped mode: one namespace per student,
+# matching the helm-rendered student-namespaces.yaml (<namespace>-sNN).
+student_ns() {
+    if [[ "${CLUSTER_ACCESS}" == "scoped" ]]; then
+        printf '%s-s%s' "${NAMESPACE}" "$1"
+    else
+        printf '%s' "${NAMESPACE}"
+    fi
+}
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -230,8 +261,36 @@ fi
 echo "student_number,url,password" > "${CSV_TMP}"
 : > "${SECRETS_TMP}"
 : > "${MANIFESTS_TMP}"
+: > "${CONFIGMAP_TMP}"
 
-cat > "${INGRESS_TMP}" << EOF
+# The workspace-startup ConfigMap is built from the canonical startup.sh. In the
+# default mode it is emitted once (shared namespace) after the loop; in scoped mode
+# it is emitted once per student namespace inside the loop. Prep the (indented) body
+# now so both paths reuse it.
+if [[ ! -f "${STARTUP_SCRIPT}" ]]; then
+    echo "ERROR: startup script not found at ${STARTUP_SCRIPT}" >&2
+    exit 1
+fi
+STARTUP_INDENTED="$(sed 's/^/    /' "${STARTUP_SCRIPT}")"
+
+# Reusable annotations block for ingresses (kept identical across modes).
+ingress_annotations() {
+    cat << 'EOF'
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+EOF
+}
+
+if [[ "${CLUSTER_ACCESS}" == "scoped" ]]; then
+    # Scoped: each student gets a self-contained Ingress in their own namespace
+    # (emitted inside the loop), so start with an empty ingress file.
+    : > "${INGRESS_TMP}"
+else
+    cat > "${INGRESS_TMP}" << EOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -249,20 +308,23 @@ spec:
     - hosts:
 EOF
 
-for i in $(seq 1 "${COUNT}"); do
-    PADDED=$(printf "%02d" "$i")
-    echo "        - s${PADDED}.${HOST}" >> "${INGRESS_TMP}"
-done
+    for i in $(seq 1 "${COUNT}"); do
+        PADDED=$(printf "%02d" "$i")
+        echo "        - s${PADDED}.${HOST}" >> "${INGRESS_TMP}"
+    done
 
-cat >> "${INGRESS_TMP}" << EOF
+    cat >> "${INGRESS_TMP}" << EOF
       secretName: ${TLS_SECRET}
   rules:
 EOF
+fi
 
 for i in $(seq 1 "${COUNT}"); do
     PADDED=$(printf "%02d" "$i")
     PASSWORD="${PASSWORDS[$i]}"
     SECRET_NAME="ws-${PADDED}-password"
+    NS_I="$(student_ns "${PADDED}")"
+    KCFG_SECRET="ws-${PADDED}-kubeconfig"
 
     cat >> "${SECRETS_TMP}" << EOF
 ---
@@ -270,7 +332,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: ${SECRET_NAME}
-  namespace: ${NAMESPACE}
+  namespace: ${NS_I}
 type: Opaque
 stringData:
   password: "${PASSWORD}"
@@ -279,7 +341,7 @@ EOF
     sed -e "s/STUDENT_NUM_PADDED/${PADDED}/g" \
         -e "s/STUDENT_NUM/${i}/g" \
         -e "s/PASSWORD_SECRET_NAME/${SECRET_NAME}/g" \
-        -e "s|__NAMESPACE__|${NAMESPACE}|g" \
+        -e "s|__NAMESPACE__|${NS_I}|g" \
         -e "s|__WORKSPACE_IMAGE__|${WORKSPACE_IMAGE}|g" \
         -e "s|__VLLM_HOST__|${VLLM_HOST}|g" \
         -e "s|__MODEL__|${MODEL}|g" \
@@ -287,7 +349,7 @@ EOF
         -e "s|__CONTENT_REPO__|${CONTENT_REPO}|g" \
         -e "s|__VLLM_API_KEY__|${VLLM_API_KEY}|g" \
         "${TEMPLATE}" \
-      | awk -v wt="${WORKSPACE_TYPE}" '
+      | awk -v wt="${WORKSPACE_TYPE}" -v ca="${CLUSTER_ACCESS}" -v kc="${KCFG_SECRET}" '
           /__WORKSPACE_TYPE_ENV__/ {
             # Default code-server: drop the sentinel entirely (byte-identical output).
             # Otherwise emit the WORKSPACE_TYPE env that startup.sh branches on.
@@ -297,11 +359,55 @@ EOF
             }
             next
           }
+          /__KUBECONFIG_MOUNT__/ {
+            # Default (cluster_access=none): drop the sentinel (byte-identical output).
+            # Scoped: mount the per-student scoped kubeconfig Secret at ~/.kube so the
+            # in-notebook kubectl uses it (NEVER the operator admin kubeconfig).
+            if (ca == "scoped") {
+              print "        - name: kubeconfig"
+              print "          mountPath: /home/coder/.kube"
+              print "          readOnly: true"
+            }
+            next
+          }
+          /__KUBECONFIG_VOLUME__/ {
+            if (ca == "scoped") {
+              print "    - name: kubeconfig"
+              print "      secret:"
+              print "        secretName: " kc
+              print "        optional: true"
+            }
+            next
+          }
           { print }' \
         >> "${MANIFESTS_TMP}"
     echo "---" >> "${MANIFESTS_TMP}"
 
-    cat >> "${INGRESS_TMP}" << EOF
+    if [[ "${CLUSTER_ACCESS}" == "scoped" ]]; then
+        # Self-contained per-student Ingress in the student's namespace (its backend
+        # Services must be co-located, so one Ingress per namespace). The wildcard
+        # *.<host> cert/DNS already covers sNN.<host> AND agent-sNN.<host>.
+        {
+            cat << EOF
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: workshop-ingress
+  namespace: ${NS_I}
+EOF
+            ingress_annotations
+            cat << EOF
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - s${PADDED}.${HOST}
+EOF
+            [[ "${AGENT_DEPLOY}" == "plain" ]] && echo "        - agent-s${PADDED}.${HOST}"
+            cat << EOF
+      secretName: ${TLS_SECRET}
+  rules:
     - host: s${PADDED}.${HOST}
       http:
         paths:
@@ -313,17 +419,149 @@ EOF
                 port:
                   number: 8080
 EOF
+            if [[ "${AGENT_DEPLOY}" == "plain" ]]; then
+                cat << EOF
+    - host: agent-s${PADDED}.${HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agent
+                port:
+                  number: 8080
+EOF
+            fi
+        } >> "${INGRESS_TMP}"
+
+        # Per-student-namespace copy of the workspace-startup ConfigMap (the pod
+        # mounts it from its own namespace).
+        cat >> "${CONFIGMAP_TMP}" << EOF
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workspace-startup
+  namespace: ${NS_I}
+data:
+  startup.sh: |
+${STARTUP_INDENTED}
+EOF
+
+        # agent_deploy: plain — a per-student agent Deployment+Service reusing the
+        # workspace image + clone-at-startup (WORKSPACE_TYPE=agent runs the repo's
+        # run-agent.sh). "Deploy" = kubectl apply; "modify" = kubectl rollout restart.
+        if [[ "${AGENT_DEPLOY}" == "plain" ]]; then
+            cat >> "${MANIFESTS_TMP}" << EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: ${NS_I}
+  labels:
+    app: agent
+    student: "${i}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+      student: "${i}"
+  template:
+    metadata:
+      labels:
+        app: agent
+        student: "${i}"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: agent
+          image: ${WORKSPACE_IMAGE}
+          command: ["/bin/bash", "/workshop-scripts/startup.sh"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: WORKSPACE_TYPE
+              value: "agent"
+            - name: VLLM_HOST
+              value: "${VLLM_HOST}"
+            - name: MODEL_NAME
+              value: "${MODEL}"
+            - name: MODEL_NAMES
+              value: "${MODEL_NAMES}"
+            - name: CONTENT_REPO
+              value: "${CONTENT_REPO}"
+            - name: VLLM_API_KEY
+              value: "${VLLM_API_KEY}"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: startup
+              mountPath: /workshop-scripts
+              readOnly: true
+      volumes:
+        - name: startup
+          configMap:
+            name: workspace-startup
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: ${NS_I}
+  labels:
+    app: agent
+    student: "${i}"
+spec:
+  type: ClusterIP
+  selector:
+    app: agent
+    student: "${i}"
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+EOF
+        fi
+    else
+        cat >> "${INGRESS_TMP}" << EOF
+    - host: s${PADDED}.${HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ws-${PADDED}
+                port:
+                  number: 8080
+EOF
+    fi
 
     echo "s${PADDED},https://s${PADDED}.${HOST}/,${PASSWORD}" >> "${CSV_TMP}"
 done
 
-# Emit the shared workspace-startup ConfigMap from the canonical startup.sh.
-# Every workspace pod mounts this and runs it as its command (clones content, etc.).
-if [[ ! -f "${STARTUP_SCRIPT}" ]]; then
-    echo "ERROR: startup script not found at ${STARTUP_SCRIPT}" >&2
-    exit 1
-fi
-cat > "${CONFIGMAP_TMP}" << EOF
+# Default mode emits ONE shared workspace-startup ConfigMap (scoped mode already
+# emitted a per-namespace copy inside the loop). Byte-identical to the original.
+if [[ "${CLUSTER_ACCESS}" != "scoped" ]]; then
+    cat > "${CONFIGMAP_TMP}" << EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -331,8 +569,9 @@ metadata:
   namespace: ${NAMESPACE}
 data:
   startup.sh: |
-$(sed 's/^/    /' "${STARTUP_SCRIPT}")
+${STARTUP_INDENTED}
 EOF
+fi
 
 mv "${CSV_TMP}" "${CSV}"
 mv "${SECRETS_TMP}" "${SECRETS}"

@@ -48,6 +48,50 @@ port-forward`** only (it tunnels via the API server, so the default-deny policy 
 it) — see [quickstart.md](quickstart.md). This keeps the GPU endpoint off the public internet
 and removes the abuse/cost surface. A public inference endpoint is an explicit non-goal.
 
+## cluster_access: scoped — per-student namespace, RBAC, NetworkPolicy
+
+Default deployments give students **no `kubectl`** — everything runs in one shared
+`workshop` namespace and the section above is the whole story. The `cluster_access: scoped`
+component (PLAN.md) hands each student in-notebook `kubectl`, which requires **two
+independent fences**; one without the other is a false sense of security.
+
+### Fence 1 — control plane (scoped kubeconfig + namespaced RBAC)
+
+`infra/helm/templates/student-namespaces.yaml` renders, per student, a dedicated
+`Namespace` (`workshop-sNN`), a `student` `ServiceAccount`, and a **namespaced**
+`Role`/`RoleBinding`. The Role grants write on workload objects (pods, services,
+configmaps, secrets, pvcs, deployments, statefulsets, replicasets) plus
+`pods/portforward` and `pods/exec` — and **nothing cluster-scoped** (no `nodes`,
+`namespaces`, or RBAC verbs). So `kubectl get nodes`, `-n kube-system …`, and any other
+student's namespace are all **Forbidden**; the student can act only inside their own
+namespace.
+
+- `infra/scripts/generate-kubeconfig.sh` mints a **bound** SA token
+  (`kubectl create token`, default 30-day TTL) and writes a per-student
+  `ws-NN-kubeconfig` Secret whose embedded kubeconfig defaults to the student's
+  namespace. The workspace pod mounts it at `~/.kube/config`.
+- **The operator admin kubeconfig is never mounted into a workspace** — only the
+  short-lived, namespace-scoped SA token is. The pod keeps
+  `automountServiceAccountToken: false`; access comes solely from the mounted kubeconfig.
+
+### Fence 2 — data plane (per-namespace NetworkPolicy)
+
+A namespace is an organizational/permissions boundary, **not** a network boundary, so
+`infra/helm/templates/student-networkpolicy.yaml` gives each student namespace its own
+**default-deny ingress** plus narrow allows: ingress-nginx → workspace:8080,
+workspace → own-namespace `vllm:8000`, and (with `agent_deploy`) ingress-nginx →
+agent:8080. Cross-namespace pod traffic is denied, so student A cannot reach student B's
+pods by IP. **Enforcement depends on the CNI** — LKE ships Cilium, which enforces it; an
+unenforced CNI makes this silently decorative (`tests/cilium-enforcement-check.sh` proves
+enforcement, `tests/phase3-isolation-check.sh` proves both fences end-to-end).
+
+Egress stays open (`policyTypes: [Ingress]` only), exactly like the shared default-deny
+policy: in-notebook `kubectl` tunnels to the API server via egress, and the control plane
+is already fenced by RBAC, so an egress rule would break `kubectl` for no isolation gain.
+
+When `cluster_access: none` (the default) none of these objects render and the shared
+single-namespace policy above is byte-identical to before.
+
 ## Access control
 
 - Each workspace gets a unique random password (`openssl rand -hex 16`), stored as a

@@ -911,7 +911,15 @@ printf '%b\n' "  ${BOLD}Generating ${STUDENTS} student workspaces${RESET}"
 rule
 GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --namespace "$NAMESPACE" --image "$WORKSPACE_IMAGE"
-    --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO")
+    --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
+    --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY")
+# cluster_access=scoped relocates each workspace into its own namespace, so a
+# same-namespace "vllm" DNS name no longer resolves to the shared vLLM. Point
+# shared-vllm workspaces at the fully-qualified shared service (dedicated-vllm puts
+# a vLLM in the student's own namespace — Phase 5 — so the short name still works).
+if [[ "$CLUSTER_ACCESS" == "scoped" && $MULTI_MODEL -eq 0 && "$INFERENCE" == "shared-vllm" ]]; then
+    GEN_PODS_ARGS+=(--vllm-host "http://vllm.${NAMESPACE}.svc.cluster.local:8000/v1")
+fi
 if [[ $MULTI_MODEL -eq 0 ]]; then
     GEN_PODS_ARGS+=(--model "$MODEL")
 else
@@ -921,6 +929,26 @@ fi
 env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-pods.sh" "${GEN_PODS_ARGS[@]}"
 
 export KUBECONFIG="${INFRA}/kubeconfig.yaml"
+
+# cluster_access=scoped: mint per-student scoped kubeconfigs (needs the namespaces +
+# ServiceAccounts that provision.sh already applied) and replicate the wildcard TLS
+# secret into each student namespace (per-namespace Ingresses need a co-located cert).
+if [[ "$CLUSTER_ACCESS" == "scoped" ]]; then
+    env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-kubeconfig.sh" -n "$STUDENTS" --namespace "$NAMESPACE"
+    if kubectl -n "$NAMESPACE" get secret workshop-tls >/dev/null 2>&1; then
+        for i in $(seq 1 "$STUDENTS"); do
+            ns="$(printf '%s-s%02d' "$NAMESPACE" "$i")"
+            kubectl -n "$NAMESPACE" get secret workshop-tls -o yaml \
+                | sed -e "s/namespace: ${NAMESPACE}/namespace: ${ns}/" \
+                      -e '/resourceVersion:/d' -e '/uid:/d' -e '/creationTimestamp:/d' \
+                | kubectl apply -f - >/dev/null
+        done
+        echo "  ✓ replicated workshop-tls into ${STUDENTS} student namespaces"
+    else
+        echo "  ! workshop-tls not found; per-student Ingresses will fall back to the default cert"
+    fi
+fi
+
 kubectl apply -f "${GEN_DIR}/"
 
 # ---- Done ----

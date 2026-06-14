@@ -18,6 +18,8 @@ CONTENT_REF="${CONTENT_REF:-main}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${HOME:-/home/coder}/workshop}"
 BIND_ADDR="${BIND_ADDR:-0.0.0.0:8080}"
 # editor component: code-server (default) | jupyter. Both serve on port 8080.
+# A third value, "agent" (agent_deploy=plain), reuses this same clone-at-startup
+# path but launches the cloned repo's agent runner instead of an editor.
 WORKSPACE_TYPE="${WORKSPACE_TYPE:-code-server}"
 
 DEFAULT_ORG="akamai-developers"
@@ -30,6 +32,17 @@ log() { echo "[startup] $*"; }
 # jupyter maps $PASSWORD to its access token (so the same access card works).
 build_launch() {
   case "${WORKSPACE_TYPE}" in
+    agent)
+      # agent_deploy=plain: run the cloned repo's agent entrypoint. "Modify" =
+      # `kubectl rollout restart`, which re-clones and re-runs run-agent.sh. If the
+      # repo ships no runner yet, idle (with a log) instead of crash-looping.
+      if [ -f "${WORKSPACE_DIR}/run-agent.sh" ]; then
+        LAUNCH=(bash "${WORKSPACE_DIR}/run-agent.sh")
+      else
+        log "agent mode: no run-agent.sh in ${WORKSPACE_DIR}; idling (kubectl rollout restart after adding one)"
+        LAUNCH=(sleep infinity)
+      fi
+      ;;
     jupyter)
       LAUNCH=(jupyter lab
         --ServerApp.ip=0.0.0.0 --ServerApp.port=8080 --no-browser
