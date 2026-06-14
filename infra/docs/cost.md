@@ -12,6 +12,13 @@ computed and how to keep the bill down.
 | CPU node (code-servers) | `g6-dedicated-8` | $0.216 |
 | NodeBalancer (ingress) | 1× | ~$0.015 |
 | Block storage (model PVCs) | per replica | small |
+| Object Storage (`object_storage: managed`) | 1 bucket + 1 scoped key / student | trivial |
+
+`object_storage: managed` storage spend itself is negligible, but it provisions **one
+bucket per student** (keys scope to buckets, not prefixes — see [security.md](security.md)).
+At ~200 students that can exceed the default account bucket-count limit: **raise it via a
+support ticket ahead of the event**. Teardown revokes the keys and empties+deletes the
+buckets, but they survive `terraform destroy`, so confirm none linger afterward.
 
 Prices verified against the Linode types API on 2026-06-06. Per-card / smaller plans:
 `g2-gpu-rtx4000a1-s` (1 GPU, 20 GB) $0.52 · `g2-gpu-rtx4000a2-s` (2 GPU, 40 GB) $1.05.

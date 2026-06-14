@@ -21,20 +21,32 @@ fi
 
 emit() { printf '%s' "$1"; }
 
+# Canned JSON defaults. Hoisted into variables because literal `}` inside a
+# ${VAR:-default} word terminates the expansion early and corrupts the JSON.
+# region column is the REGION id (us-iad), distinct from cluster id (us-iad-1).
+DEF_CLUSTERS='[{"id":"us-ord-1","region":"us-ord","status":"available"}]'
+DEF_BUCKET_CREATE='[{"label":"fake-bucket","region":"us-ord"}]'
+DEF_KEY_CREATE='[{"id":4242,"access_key":"FAKEACCESS","secret_key":"FAKESECRET"}]'
+
 case "$1 ${2:-}" in
   "object-storage clusters-list")
-    # region column is the REGION id (us-iad), distinct from cluster id (us-iad-1).
-    emit "${FAKE_OBJ_CLUSTERS:-[{\"id\":\"us-ord-1\",\"region\":\"us-ord\",\"status\":\"available\"}]}"
+    emit "${FAKE_OBJ_CLUSTERS:-$DEF_CLUSTERS}"
     ;;
   "object-storage buckets-list")
     emit "${FAKE_OBJ_BUCKETS:-[]}"
+    ;;
+  "object-storage buckets-create")
+    emit "${FAKE_OBJ_BUCKET_CREATE:-$DEF_BUCKET_CREATE}"
+    ;;
+  "object-storage buckets-delete")
+    emit ""
     ;;
   "object-storage keys-list")
     emit "${FAKE_OBJ_KEYS:-[]}"
     ;;
   "object-storage keys-create")
     # Mint a deterministic fake key pair so Secret emission is testable.
-    emit "${FAKE_OBJ_KEY_CREATE:-[{\"id\":4242,\"access_key\":\"FAKEACCESS\",\"secret_key\":\"FAKESECRET\"}]}"
+    emit "${FAKE_OBJ_KEY_CREATE:-$DEF_KEY_CREATE}"
     ;;
   "object-storage keys-delete")
     emit ""

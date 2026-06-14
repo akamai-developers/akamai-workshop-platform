@@ -58,6 +58,11 @@ teardown() {
     note "tearing down (always) ..."
     ( cd "$ROOT_DIR" && ./deploy.sh teardown --yes --namespace "$NAMESPACE" ) \
         || ( cd "$TF_DIR" && terraform destroy -auto-approve )
+    # Object Storage is account-level (survives terraform destroy). deploy.sh teardown
+    # already revokes/deletes by prefix; re-run here as a backstop for the destroy
+    # fallback above. Idempotent + prefix-filtered, so a no-op when none was provisioned.
+    LINODE_CLI_TOKEN="${TF_VAR_token}" "${SCRIPT_DIR}/provision-object-storage.sh" --teardown \
+        --region "$REGION" --prefix "$LABEL" >/dev/null 2>&1 || true
     note "verifying no '${LABEL}' cluster remains ..."
     if command -v linode-cli >/dev/null 2>&1; then
         LINODE_CLI_TOKEN="${TF_VAR_token}" linode-cli lke clusters-list --text 2>/dev/null \

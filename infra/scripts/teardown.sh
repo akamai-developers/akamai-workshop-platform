@@ -98,6 +98,19 @@ else
     printf '%b\n' "  ${DIM}No kubeconfig found; skipping K8s cleanup${RESET}"
 fi
 
+# Step 1b: Object Storage teardown (account-level — survives terraform destroy).
+# Revoke every per-student key + empty/delete every bucket prefixed by the run label.
+# Idempotent and prefix-filtered, so it is a safe no-op when object_storage was never
+# managed. The bucket prefix is the cluster label (deploy.sh passes --prefix "$LABEL").
+if [[ -n "$CLUSTER_LABEL" && -n "$CLUSTER_REGION" ]] && command -v linode-cli >/dev/null 2>&1; then
+    echo ""
+    printf '%b\n' "  ${BOLD}Step 1b: Object Storage cleanup${RESET}"
+    env LINODE_CLI_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}" \
+        "${SCRIPT_DIR}/provision-object-storage.sh" --teardown \
+        --region "$CLUSTER_REGION" --prefix "$CLUSTER_LABEL" \
+        || printf '%b\n' "  ${DIM}(object-storage cleanup reported issues — verify in cloud.linode.com)${RESET}"
+fi
+
 # Step 2: Terraform destroy.
 # In-cluster-only charts (gpu-operator, cloud-firewall CRD/controller) die with
 # the cluster anyway — helm-uninstalling them first is wasted time and can

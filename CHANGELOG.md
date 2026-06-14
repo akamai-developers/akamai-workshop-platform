@@ -9,6 +9,29 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 4 — `object_storage: managed`
+- **`infra/scripts/provision-object-storage.sh`** (new): per-student bucket + a
+  **bucket-scoped limited key** (read_write, locked to one bucket — that scoping *is* the
+  isolation; students never get the operator token). Emits a per-student `ws-NN-object-storage`
+  Secret with the SA-agent env vars (`AWS_ACCESS_KEY_ID/SECRET`, `SESSION_BUCKET/ENDPOINT_URL/REGION`).
+  Resolves the **region id** (`us-ord`) from `clusters-list`, never the cluster id (`us-ord-1`).
+  Idempotent via a gitignored `generated/object-storage.csv` (re-runs preserve buckets/keys,
+  like passwords). A `--teardown` mode revokes every key + empties/deletes every bucket
+  **filtered by the run-label prefix**.
+- **Teardown wired in** (account-level resources survive `terraform destroy`):
+  `teardown.sh` Step 1b and the `e2e-smoke.sh` EXIT trap both invoke `--teardown` —
+  idempotent and prefix-filtered, a clean no-op when no buckets were provisioned.
+- **`workspace-pod-template.yaml` + `generate-pods.sh`**: `--object-storage managed` wires the
+  per-student Secret into the workspace pod (and the deployed agent) via `envFrom … optional:
+  true` at the new `__OBJECT_STORAGE_ENVFROM__` sentinel. Default (`none`) drops the sentinel
+  so the pod manifest stays byte-identical.
+- **`deploy.sh`**: provisions Object Storage after generate-pods when `object_storage=managed`
+  (prefix = the unique cluster label); threads `--object-storage` into generate-pods.
+- **Verification (offline):** 12 new `tests/bats/object-storage.bats` (bucket-scoped key create,
+  region-id resolution, idempotent re-run, prefix-filtered teardown revoke+delete, envFrom
+  wiring) against the fake `linode-cli`; rendered Secrets pass `kubeconform`; both goldens
+  unchanged. Real bucket/key provisioning is **not** in the paid smoke.
+
 ### Phase 3 — `cluster_access: scoped` + `agent_deploy: plain`
 - **`infra/helm/templates/student-namespaces.yaml`** (gated on `cluster_access=scoped`):
   per-student `Namespace` (`workshop-sNN`), `student` `ServiceAccount`, and a **namespaced**

@@ -912,7 +912,8 @@ rule
 GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --namespace "$NAMESPACE" --image "$WORKSPACE_IMAGE"
     --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
-    --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY")
+    --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY"
+    --object-storage "$OBJECT_STORAGE")
 # cluster_access=scoped relocates each workspace into its own namespace, so a
 # same-namespace "vllm" DNS name no longer resolves to the shared vLLM. Point
 # shared-vllm workspaces at the fully-qualified shared service (dedicated-vllm puts
@@ -947,6 +948,17 @@ if [[ "$CLUSTER_ACCESS" == "scoped" ]]; then
     else
         echo "  ! workshop-tls not found; per-student Ingresses will fall back to the default cert"
     fi
+fi
+
+# object_storage=managed: provision a per-student bucket + bucket-scoped key (the
+# unique run LABEL prefixes the globally-unique bucket names) and emit per-student
+# Secrets into generated/. Idempotent; teardown.sh revokes/deletes by the same prefix.
+if [[ "$OBJECT_STORAGE" == "managed" ]]; then
+    echo ""
+    printf '%b\n' "  ${BOLD}Provisioning per-student Object Storage${RESET}"
+    "${SCRIPTS}/provision-object-storage.sh" \
+        -n "$STUDENTS" --region "$REGION" --prefix "$LABEL" \
+        --namespace "$NAMESPACE" --cluster-access "$CLUSTER_ACCESS"
 fi
 
 kubectl apply -f "${GEN_DIR}/"
