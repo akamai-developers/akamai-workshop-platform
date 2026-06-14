@@ -79,6 +79,10 @@ inference: shared-vllm
 # gpus_per_student: only meaningful when inference=dedicated-vllm. 1 (default).
 #   2 is RESERVED for v2 (two-models + agentgateway routing) — not built yet.
 gpus_per_student: 1
+# dedicated-vllm only: the per-student vLLM is DELIBERATELY under-tuned so the
+# saturate/optimize lab has something to fix. Students raise these via kubectl.
+dedicated_gpu_memory_util: 0.4
+dedicated_max_model_len: 2048
 # cluster_access: none (today) | scoped (per-student namespace + scoped kubeconfig +
 #   per-namespace NetworkPolicy). "scoped" is what gives students in-notebook kubectl.
 cluster_access: none

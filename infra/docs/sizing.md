@@ -142,6 +142,34 @@ Always cap `--max-model-len` and keep prefix caching on — a shared class syste
 tool schemas is a large KV win. Gated models (e.g. Llama 3.x) are intentionally off the
 menu to keep the no-token guarantee.
 
+## Inference modes (the `inference` component)
+
+The default `shared-vllm` shape (above) pools ~16 students per replica. Two other modes
+reshape the GPU footprint:
+
+- **`dedicated-vllm`** — one **deliberately under-tuned** vLLM per student on their **own
+  GPU node**, so the saturate/optimize lab has something to fix. GPU nodes = `students × 1`
+  (1 GPU each), **not** `students / 16`. The smallest single-GPU plan that fits the model is
+  auto-picked (e.g. `g2-gpu-rtx4000a1-s`, $0.52/hr). Requires `cluster_access: scoped` (each
+  vLLM lives in the student's namespace, reached via the in-namespace `vllm` Service). **GPU
+  stock bites hardest here** — `students` GPUs in one region; reserve ahead and preflight.
+
+  ```bash
+  infra/scripts/sizing.py plan --students 12 --model Qwen/Qwen3-4B-Instruct-2507 \
+    --inference dedicated-vllm --gpus-per-student 1 --editor jupyter
+  ```
+
+- **`external`** — no platform vLLM and **zero GPU nodes**; the workshop calls a
+  user-supplied OpenAI-compatible endpoint (`inference_endpoint` + optional
+  `inference_api_key`). The cost preview omits the GPU line entirely (CPU-only).
+
+  ```bash
+  infra/scripts/sizing.py plan --students 30 --model Qwen/Qwen3-4B-Instruct-2507 \
+    --inference external
+  ```
+
+`gpus_per_student: 2` (two models + agentgateway routing) is reserved for v2.
+
 ## Multi-model sizing
 
 When deploying multiple models, the sizing calculator computes independent GPU plans

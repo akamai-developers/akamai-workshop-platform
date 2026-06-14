@@ -9,6 +9,33 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 5 — `inference: dedicated-vllm` (1 GPU) + `inference: external` + component-aware sizing
+- **`infra/helm/templates/student-vllm.yaml`** (new, gated on `inference=dedicated-vllm` AND
+  `cluster_access=scoped`): one **deliberately under-tuned** vLLM per student
+  (`--gpu-memory-utilization=0.4`, `--max-model-len=2048`) as a `Deployment`+`PVC`+`Service`
+  in the student's namespace, pinned to a GPU node (`pool: gpu`, `nvidia.com/gpu: 1`). The
+  Service is named `vllm` so the in-namespace workspace short name resolves. One-per-node is
+  enforced by GPU scarcity (single-GPU nodes). New under-tune knobs in `values.yaml`
+  (`dedicated_gpu_memory_util`, `dedicated_max_model_len`).
+- **Shared vLLM gating**: `vllm-statefulset.yaml`/`vllm-service.yaml` now render only for
+  `inference=shared-vllm`, so `dedicated-vllm`/`external` deploy no shared vLLM. Default
+  (shared-vllm) render is byte-identical.
+- **`inference: external`**: deploys NO platform vLLM. `terraform/main.tf` drops the GPU pool
+  when `gpu_node_count=0`; the workspace env points at a user-supplied
+  `--inference-endpoint` (+ optional `--inference-api-key`).
+- **`sizing.py` component-aware**: `dedicated-vllm` → GPU nodes = `students × 1` + per-student
+  cost (not `students/16`); `external` → 0 GPU nodes and the cost preview omits the GPU line;
+  `--editor jupyter` labels CPU nodes "workspaces" not "code-servers". New `selftest` cases for
+  dedicated + external. `shared-vllm` + `code-server` output is byte-identical.
+- **`deploy.sh`**: threads `--inference/--gpus-per-student/--editor` into sizing; component-aware
+  preview (dedicated per-student line, external endpoint line); enforces `dedicated-vllm ⇒
+  scoped` and `external ⇒ endpoint`; `inference_endpoint`/`inference_api_key` config keys; flags
+  preserved across the "Change sizing" re-exec.
+- **Verification (offline)**: 11 new `tests/bats/inference.bats` (helm gating, sizing modes,
+  deploy validation), `kubeconform` on dedicated/external renders, `sizing.py selftest`, both
+  goldens + the default dry-run byte-identical. Real GPU scheduling is **not** verifiable
+  offline (pods stay Pending in kind) — covered by the Phase-7 smoke (dedicated-vllm, 1 GPU).
+
 ### Phase 4 — `object_storage: managed`
 - **`infra/scripts/provision-object-storage.sh`** (new): per-student bucket + a
   **bucket-scoped limited key** (read_write, locked to one bucket — that scoping *is* the

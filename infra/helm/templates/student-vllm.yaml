@@ -1,0 +1,149 @@
+{{- /*
+inference: dedicated-vllm — one DELIBERATELY under-tuned vLLM per student, in the
+student's own namespace (<namespace>-sNN), pinned to a GPU node. The Service is named
+`vllm` so the in-namespace workspace's VLLM_HOST=http://vllm:8000/v1 resolves to it
+(no FQDN needed). Students raise --gpu-memory-utilization / --max-model-len via kubectl
+in the saturate/optimize lab — that's the workshop content.
+
+Requires per-student namespaces, so this is gated on BOTH inference=dedicated-vllm and
+cluster_access=scoped (deploy.sh enforces the pairing). 1 GPU/student only — the 2-GPU
+routing path is reserved for v2. Default (shared-vllm) renders nothing here, so the
+default helm output is byte-identical.
+
+One-vLLM-per-node is enforced by GPU scarcity: each pod requests nvidia.com/gpu:
+{{ .Values.gpus_per_student }} and the dedicated GPU nodes are single-GPU, so a second
+vLLM cannot schedule onto an occupied node. No model PVC is shared across students —
+each gets its own ReadWriteOnce cache so a restart during tuning doesn't re-download.
+
+NOTE: GPU behavior is NOT verifiable offline (no GPUs in kind — pods stay Pending). The
+objects/nodeSelectors/resources are asserted offline; real scheduling is covered by the
+Phase-7 smoke (dedicated-vllm, 1 student, 1 GPU).
+*/ -}}
+{{- if and (eq .Values.inference "dedicated-vllm") (eq .Values.cluster_access "scoped") }}
+{{- $root := . }}
+{{- range $n := untilStep 1 (int (add .Values.student_count 1)) 1 }}
+{{- $ns := printf "%s-s%02d" $root.Values.namespace $n }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-model-cache
+  namespace: {{ $ns }}
+  labels:
+    app: vllm
+    awp-student-number: "{{ $n }}"
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $root.Values.model_cache_size }}
+  storageClassName: linode-block-storage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: {{ $ns }}
+  labels:
+    app: vllm
+    awp-student-number: "{{ $n }}"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+        awp-student-number: "{{ $n }}"
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      nodeSelector:
+        pool: gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: {{ $root.Values.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          # Deliberately under-tuned — the lab is to raise these.
+          args:
+            - --model={{ $root.Values.model }}
+            - --download-dir={{ $root.Values.download_dir }}
+            - --tensor-parallel-size={{ $root.Values.gpus_per_student }}
+            - --gpu-memory-utilization={{ $root.Values.dedicated_gpu_memory_util }}
+            - --max-model-len={{ $root.Values.dedicated_max_model_len }}
+            - --host=0.0.0.0
+            - --port=8000
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-secrets
+                  key: HUGGING_FACE_HUB_TOKEN
+                  optional: true
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            requests:
+              cpu: {{ $root.Values.vllm_cpu_request | quote }}
+              memory: {{ $root.Values.vllm_mem_request | quote }}
+              nvidia.com/gpu: {{ $root.Values.gpus_per_student }}
+            limits:
+              nvidia.com/gpu: {{ $root.Values.gpus_per_student }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ $root.Values.download_dir }}
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: vllm-model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $root.Values.shm_size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: {{ $ns }}
+  labels:
+    app: vllm
+    awp-student-number: "{{ $n }}"
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+{{- end }}
+{{- end }}
