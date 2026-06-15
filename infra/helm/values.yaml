@@ -81,7 +81,9 @@ inference: shared-vllm
 gpus_per_student: 1
 # dedicated-vllm only: the per-student vLLM is DELIBERATELY under-tuned so the
 # saturate/optimize lab has something to fix. Students raise these via kubectl.
-dedicated_gpu_memory_util: 0.4
+# 0.7 (not lower): must still LOAD weights + minimal KV on a 20 GB card, else vLLM
+# crashes at startup ("no available memory for cache blocks"). Students raise toward 0.9.
+dedicated_gpu_memory_util: 0.7
 dedicated_max_model_len: 2048
 # cluster_access: none (today) | scoped (per-student namespace + scoped kubeconfig +
 #   per-namespace NetworkPolicy). "scoped" is what gives students in-notebook kubectl.
