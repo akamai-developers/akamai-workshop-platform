@@ -22,6 +22,15 @@ if grep -q "^multi_model: true" "${HELM_VALUES}" 2>/dev/null; then
     MULTI_MODEL=1
 fi
 
+# Detect the inference mode + student count. In dedicated-vllm mode each student
+# runs their OWN vLLM Deployment (named 'vllm') in their own namespace
+# (<namespace>-sNN), so the readiness wait targets per-student Deployments, not the
+# shared StatefulSet.
+INFERENCE="$(grep -E '^inference:' "${HELM_VALUES}" 2>/dev/null | head -1 | sed -E 's/^inference:[[:space:]]*//; s/[[:space:]#].*$//')"
+INFERENCE="${INFERENCE:-shared-vllm}"
+STUDENT_COUNT="$(grep -E '^student_count:' "${HELM_VALUES}" 2>/dev/null | head -1 | sed -E 's/[^0-9]//g')"
+STUDENT_COUNT="${STUDENT_COUNT:-1}"
+
 echo "=== akamai-workshop-platform — Provisioning ==="
 echo ""
 
@@ -186,7 +195,15 @@ kubectl apply -f "${RENDERED}"
 echo ""
 echo "--- Step 5: Waiting for vLLM pods to be ready ---"
 echo "    (First start: 5-10 min while each replica downloads the model to its PVC)"
-if [ "${MULTI_MODEL}" -eq 0 ]; then
+if [ "${INFERENCE}" = "dedicated-vllm" ]; then
+    # Per-student dedicated vLLM: one Deployment named 'vllm' in each student
+    # namespace (<namespace>-sNN), created by generate-pods.sh in scoped mode.
+    for i in $(seq 1 "${STUDENT_COUNT}"); do
+        SNS="${NAMESPACE}-s$(printf '%02d' "$i")"
+        echo "  Waiting for vllm in ${SNS}..."
+        kubectl -n "${SNS}" rollout status deployment/vllm --timeout=900s
+    done
+elif [ "${MULTI_MODEL}" -eq 0 ]; then
     kubectl -n "${NAMESPACE}" rollout status statefulset/vllm --timeout=900s
 else
     # Wait for each per-model vLLM StatefulSet.
