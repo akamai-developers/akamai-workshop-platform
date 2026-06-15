@@ -101,8 +101,9 @@ spec:
               name: http
           resources:
             requests:
-              cpu: {{ $root.Values.vllm_cpu_request | quote }}
-              memory: {{ $root.Values.vllm_mem_request | quote }}
+              # Sized for the small single-GPU node, NOT the shared vLLM's big-node requests.
+              cpu: {{ $root.Values.dedicated_vllm_cpu_request | quote }}
+              memory: {{ $root.Values.dedicated_vllm_mem_request | quote }}
               nvidia.com/gpu: {{ $root.Values.gpus_per_student }}
             limits:
               nvidia.com/gpu: {{ $root.Values.gpus_per_student }}
