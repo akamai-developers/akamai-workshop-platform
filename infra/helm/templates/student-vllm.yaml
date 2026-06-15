@@ -49,6 +49,9 @@ metadata:
     awp-student-number: "{{ $n }}"
 spec:
   replicas: 1
+  # First start downloads the model to a fresh PVC on a cold GPU node; allow up to 30 min
+  # before the Deployment self-reports ProgressDeadlineExceeded (default 600s is too short).
+  progressDeadlineSeconds: 1800
   strategy:
     type: Recreate
   selector:
@@ -107,7 +110,8 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            failureThreshold: 60
+            # 180 x 10s = 30 min for first-start model download + load on a cold node.
+            failureThreshold: 180
             periodSeconds: 10
           readinessProbe:
             httpGet:

@@ -201,7 +201,16 @@ if [ "${INFERENCE}" = "dedicated-vllm" ]; then
     for i in $(seq 1 "${STUDENT_COUNT}"); do
         SNS="${NAMESPACE}-s$(printf '%02d' "$i")"
         echo "  Waiting for vllm in ${SNS}..."
-        kubectl -n "${SNS}" rollout status deployment/vllm --timeout=900s
+        # 1800s matches the Deployment progressDeadlineSeconds (cold first-start download).
+        # On failure, dump diagnostics BEFORE returning so a torn-down cluster is still debuggable.
+        if ! kubectl -n "${SNS}" rollout status deployment/vllm --timeout=1800s; then
+            echo "  vLLM in ${SNS} did not become ready — diagnostics:" >&2
+            kubectl -n "${SNS}" get pods -o wide 2>&1 | sed 's/^/    /' || true
+            kubectl -n "${SNS}" describe deployment/vllm 2>&1 | tail -25 | sed 's/^/    /' || true
+            kubectl -n "${SNS}" logs deploy/vllm --tail=60 2>&1 | sed 's/^/    /' || true
+            kubectl -n "${SNS}" get events --sort-by=.lastTimestamp 2>&1 | tail -20 | sed 's/^/    /' || true
+            exit 1
+        fi
     done
 elif [ "${MULTI_MODEL}" -eq 0 ]; then
     kubectl -n "${NAMESPACE}" rollout status statefulset/vllm --timeout=900s
