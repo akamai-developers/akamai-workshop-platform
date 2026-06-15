@@ -24,5 +24,5 @@ agent_deploy:     plain            # capstone: ship the tuned setup as a Deploym
 object_storage:   none
 
 # The per-student vLLM ships under-tuned on purpose (helm values
-# dedicated_gpu_memory_util: 0.4, dedicated_max_model_len: 2048). Raising those —
-# and proving it with the /metrics helper — is the workshop.
+# dedicated_gpu_memory_util: 0.7, dedicated_max_model_len: 2048). Raising those,
+# and proving it with the /metrics helper, is the workshop.

@@ -29,7 +29,7 @@ python3 infra/scripts/sizing.py catalog
 
 ## 2. Deploy
 
-Interactive — answer the five questions, confirm the cost preview:
+Interactive — answer the six questions, confirm the cost preview:
 
 ```bash
 make deploy            # or ./deploy.sh

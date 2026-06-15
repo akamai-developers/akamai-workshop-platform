@@ -64,6 +64,8 @@ GPU_MEMORY_UTIL="0.9"
 EDITOR=""            # code-server (default) | jupyter
 INFERENCE=""         # shared-vllm (default) | dedicated-vllm | external
 GPUS_PER_STUDENT=""  # 1 (default); 2 reserved/v2
+GPU_SHARING=""       # none (default) | timeslicing; mps reserved/v2
+GPU_TIMESLICING_REPLICAS=""  # logical GPUs/card when gpu_sharing=timeslicing (default 2)
 CLUSTER_ACCESS=""    # none (default) | scoped
 OBJECT_STORAGE=""    # none (default) | managed
 AGENT_DEPLOY=""      # none (default) | plain; kagent reserved/v2
@@ -211,7 +213,9 @@ keys = {
  "workspace_image":"WORKSPACE_IMAGE","max_model_len":"MAX_MODEL_LEN","gpu_memory_util":"GPU_MEMORY_UTIL",
  # Component catalog (editor accepts the legacy alias workspace_type too).
  "editor":"EDITOR","workspace_type":"EDITOR","inference":"INFERENCE",
- "gpus_per_student":"GPUS_PER_STUDENT","cluster_access":"CLUSTER_ACCESS",
+ "gpus_per_student":"GPUS_PER_STUDENT","gpu_sharing":"GPU_SHARING",
+ "gpu_timeslicing_replicas":"GPU_TIMESLICING_REPLICAS",
+ "cluster_access":"CLUSTER_ACCESS",
  "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
  "inference_endpoint":"INFERENCE_ENDPOINT","inference_api_key":"INFERENCE_API_KEY",
 }
@@ -257,6 +261,8 @@ while [[ $# -gt 0 ]]; do
         --editor|--workspace-type) EDITOR="$2"; shift 2 ;;
         --inference)         INFERENCE="$2"; shift 2 ;;
         --gpus-per-student)  GPUS_PER_STUDENT="$2"; shift 2 ;;
+        --gpu-sharing)       GPU_SHARING="$2"; shift 2 ;;
+        --gpu-timeslicing-replicas) GPU_TIMESLICING_REPLICAS="$2"; shift 2 ;;
         --cluster-access)    CLUSTER_ACCESS="$2"; shift 2 ;;
         --object-storage)    OBJECT_STORAGE="$2"; shift 2 ;;
         --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
@@ -474,6 +480,8 @@ esac
 EDITOR="${EDITOR:-code-server}"
 INFERENCE="${INFERENCE:-shared-vllm}"
 GPUS_PER_STUDENT="${GPUS_PER_STUDENT:-1}"
+GPU_SHARING="${GPU_SHARING:-none}"
+GPU_TIMESLICING_REPLICAS="${GPU_TIMESLICING_REPLICAS:-2}"
 CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
 OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
 AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
@@ -499,6 +507,20 @@ case "$GPUS_PER_STUDENT" in
     2) err "gpus_per_student '2' is reserved for v2 (two-models + agentgateway routing). Use 1." ;;
     *) err "gpus_per_student must be 1 (got '$GPUS_PER_STUDENT')" ;;
 esac
+case "$GPU_SHARING" in
+    none|timeslicing) ;;
+    mps) err "gpu_sharing 'mps' is reserved for v2 (not built yet). Use 'timeslicing'." ;;
+    *) err "gpu_sharing must be 'none' or 'timeslicing' (got '$GPU_SHARING')" ;;
+esac
+case "$GPU_TIMESLICING_REPLICAS" in
+    ''|*[!0-9]*) err "gpu_timeslicing_replicas must be a positive integer (got '$GPU_TIMESLICING_REPLICAS')" ;;
+    *) [[ "$GPU_TIMESLICING_REPLICAS" -lt 2 ]] && err "gpu_timeslicing_replicas must be >= 2 (got '$GPU_TIMESLICING_REPLICAS'); time-slicing only matters when a card hosts 2+ pods." ;;
+esac
+# Time-slicing only earns its keep on the per-student dedicated GPU (lets a student run
+# two vLLMs on one card — the two-models lab). It's a no-op for shared/external inference.
+if [[ "$GPU_SHARING" == "timeslicing" && "$INFERENCE" != "dedicated-vllm" ]]; then
+    err "gpu_sharing='timeslicing' requires inference='dedicated-vllm' (it shares each student's own GPU)."
+fi
 # Dependencies (PLAN.md): shipping an agent needs a namespace to ship into.
 if [[ "$AGENT_DEPLOY" != "none" && "$CLUSTER_ACCESS" != "scoped" ]]; then
     err "agent_deploy='$AGENT_DEPLOY' requires cluster_access='scoped' (the agent ships into the student's namespace)."
@@ -529,6 +551,7 @@ fi
 # True when the requested composition differs from the default platform shape.
 components_nondefault() {
     [[ "$EDITOR" != "code-server" || "$INFERENCE" != "shared-vllm" \
+       || "$GPU_SHARING" != "none" \
        || "$CLUSTER_ACCESS" != "none" || "$OBJECT_STORAGE" != "none" \
        || "$AGENT_DEPLOY" != "none" ]]
 }
@@ -649,6 +672,9 @@ if components_nondefault; then
     else
         printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "$INFERENCE"
     fi
+    if [[ "$GPU_SHARING" != "none" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "GPU sharing:" "${GPU_SHARING} (${GPU_TIMESLICING_REPLICAS} logical GPUs/card)"
+    fi
     printf "  ${DIM}%-14s${RESET} %s\n" "Cluster acc.:" "$CLUSTER_ACCESS"
     printf "  ${DIM}%-14s${RESET} %s\n" "Object store:" "$OBJECT_STORAGE"
     printf "  ${DIM}%-14s${RESET} %s\n" "Agent deploy:" "$AGENT_DEPLOY"
@@ -688,7 +714,8 @@ if interactive; then
                      --label "$LABEL" --domain "$DOMAIN" --region "$REGION" \
                      ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} \
                      --editor "$EDITOR" --inference "$INFERENCE" \
-                     --gpus-per-student "$GPUS_PER_STUDENT" \
+                     --gpus-per-student "$GPUS_PER_STUDENT" --gpu-sharing "$GPU_SHARING" \
+                     --gpu-timeslicing-replicas "$GPU_TIMESLICING_REPLICAS" \
                      --cluster-access "$CLUSTER_ACCESS" \
                      --object-storage "$OBJECT_STORAGE" --agent-deploy "$AGENT_DEPLOY" \
                      ${INFERENCE_ENDPOINT:+--inference-endpoint "$INFERENCE_ENDPOINT"} \
@@ -847,6 +874,8 @@ COMPONENTS_YAML="$(cat <<EOF
 editor: ${EDITOR}
 inference: ${INFERENCE}
 gpus_per_student: ${GPUS_PER_STUDENT}
+gpu_sharing: ${GPU_SHARING}
+gpu_timeslicing_replicas: ${GPU_TIMESLICING_REPLICAS}
 cluster_access: ${CLUSTER_ACCESS}
 object_storage: ${OBJECT_STORAGE}
 agent_deploy: ${AGENT_DEPLOY}

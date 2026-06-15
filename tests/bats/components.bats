@@ -20,11 +20,13 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
 @test "every component flag round-trips into the preview" {
   dry --students 20 --model Qwen/Qwen3-4B-Instruct-2507 \
       --editor jupyter --inference dedicated-vllm --gpus-per-student 1 \
+      --gpu-sharing timeslicing \
       --cluster-access scoped --object-storage managed --agent-deploy plain
   [ "$status" -eq 0 ]
   [[ "$output" == *"Components"* ]]
   [[ "$output" == *"jupyter"* ]]
   [[ "$output" == *"dedicated-vllm"* ]]
+  [[ "$output" == *"timeslicing"* ]]
   [[ "$output" == *"scoped"* ]]
   [[ "$output" == *"managed"* ]]
   [[ "$output" == *"plain"* ]]
@@ -62,6 +64,32 @@ EOF
   dry --agent-deploy plain
   [ "$status" -ne 0 ]
   [[ "$output" == *"requires cluster_access"* ]]
+}
+
+@test "reserved gpu_sharing=mps is rejected" {
+  dry --gpu-sharing mps --inference dedicated-vllm --cluster-access scoped
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mps"* && "$output" == *"reserved"* ]]
+}
+
+@test "gpu_sharing=timeslicing requires inference=dedicated-vllm" {
+  dry --gpu-sharing timeslicing
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"requires inference"* ]]
+}
+
+@test "gpu_timeslicing_replicas < 2 is rejected" {
+  dry --inference dedicated-vllm --cluster-access scoped \
+      --gpu-sharing timeslicing --gpu-timeslicing-replicas 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gpu_timeslicing_replicas must be >= 2"* ]]
+}
+
+@test "gpu_timeslicing_replicas non-numeric is rejected" {
+  dry --inference dedicated-vllm --cluster-access scoped \
+      --gpu-sharing timeslicing --gpu-timeslicing-replicas abc
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be a positive integer"* ]]
 }
 
 @test "unknown enum value is rejected" {

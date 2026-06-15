@@ -79,6 +79,17 @@ inference: shared-vllm
 # gpus_per_student: only meaningful when inference=dedicated-vllm. 1 (default).
 #   2 is RESERVED for v2 (two-models + agentgateway routing) — not built yet.
 gpus_per_student: 1
+# gpu_sharing: how one physical GPU is shared. none (today: the NVIDIA device plugin
+#   gives each pod an exclusive GPU) | timeslicing (turn on NVIDIA time-slicing so more
+#   than one pod can land on a single card). timeslicing is what lets a student run TWO
+#   vLLMs on their one GPU (the two-models-on-one-GPU lab). mps is RESERVED for v2.
+#   Applied by provision.sh AFTER the operator is up (it patches the gpu-operator
+#   ClusterPolicy); the terraform gpu-operator install is untouched, so the default
+#   (none) render + cluster are byte-identical to today.
+gpu_sharing: none
+# gpu_sharing=timeslicing only: logical GPUs advertised per physical card. 2 fits the
+#   two-models lab (each server at ~0.45 GPU-memory-util); raise for more co-tenant pods.
+gpu_timeslicing_replicas: 2
 # dedicated-vllm only: the per-student vLLM is DELIBERATELY under-tuned so the
 # saturate/optimize lab has something to fix. Students raise these via kubectl.
 # 0.7 (not lower): must still LOAD weights + minimal KV on a 20 GB card, else vLLM
