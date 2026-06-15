@@ -47,15 +47,24 @@ spec:
 # Allow this student's workspace to reach a vLLM in THEIR OWN namespace on 8000
 # (the dedicated-vllm component lands a per-student vLLM here in Phase 5). Harmless
 # when no vLLM pod exists. Cross-namespace vLLM access is never granted here.
+#
+# Default targets the baseline vLLM (app: vllm). When gpu_sharing=timeslicing, the
+# two-models lab adds vllm-fast / vllm-smart pods (different labels) on the shared
+# card, so the rule targets ALL pods on 8000 — the student owns their whole namespace
+# and cross-namespace is still denied (the `from` selector is same-namespace only).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-workspace-to-vllm
   namespace: {{ $ns }}
 spec:
+  {{- if eq $root.Values.gpu_sharing "timeslicing" }}
+  podSelector: {}
+  {{- else }}
   podSelector:
     matchLabels:
       app: vllm
+  {{- end }}
   policyTypes: [Ingress]
   ingress:
     - from:

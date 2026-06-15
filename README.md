@@ -14,6 +14,7 @@ The [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop
 
 - [Terraform](https://terraform.io) version 1.5 or later
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [Helm](https://helm.sh/) version 3 or later (renders the chart on every deploy)
 - `bash`, `python3`, and `openssl`, which are standard on macOS and Linux
 
 You do not need a HuggingFace token, because the model menu is ungated only. You do not need Docker or a registry login.
@@ -81,8 +82,8 @@ These six inputs are the entire user surface. Anything you omit is filled by the
 
 | Input | Default | Meaning |
 |---|---|---|
-| `name` | `ai-agents-workshop` | Deployment name; becomes the Linode cluster label |
-| `students` | required | Number of student workspaces to create |
+| `name` (config key: `label`) | `ai-agents-workshop` | Deployment name; becomes the Linode cluster label. CLI: `--name`/`--label`; in `config.yaml` the key is `label` (a `name:` line is ignored) |
+| `students` | `80` | Number of student workspaces to create |
 | `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id, or comma-separated ids for multi-model (e.g. `"Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"`). Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
 | `content_repo` | `""` | Git repo cloned into each workspace at startup. Blank uses `akamai-developers/ai-agents-workshop`. Also accepts a full git URL, `owner/repo`, or a bare repo name. |
 | `domain` | `""` (no domain) | Empty uses `sslip.io` and self-signed TLS. A value uses Linode DNS and Let's Encrypt. |
@@ -140,7 +141,7 @@ kubectl -n workshop get agentgatewaybackends   # from the cluster
 
 ## Component model
 
-The five inputs above provision the **default** workshop shape: a browser code-server
+The six inputs above provision the **default** workshop shape: a browser code-server
 per student plus one shared vLLM endpoint. Different workshops are composed from a
 catalog of independent, per-student **components** — selected once per classroom in the
 config file (the interactive wizard never prompts for them). Every component defaults to
@@ -150,8 +151,10 @@ platform.
 | Component | Values (default first) | Controls |
 |---|---|---|
 | `editor` | `code-server` \| `jupyter` | The workspace UI |
-| `inference` | `shared-vllm` \| `dedicated-vllm` \| `external` | Where the model comes from |
+| `inference` | `shared-vllm` \| `dedicated-vllm` \| `external` | Where the model comes from. `dedicated-vllm` requires `cluster_access: scoped`; `external` requires `--inference-endpoint <url>` (optional `--inference-api-key`) |
 | `gpus_per_student` | `1` | GPUs for `dedicated-vllm` (2 reserved for v2) |
+| `gpu_sharing` | `none` \| `timeslicing` | NVIDIA time-slicing so two vLLMs share one card (the [two-models lab](infra/docs/gpu-sharing.md)); needs `dedicated-vllm` |
+| `gpu_timeslicing_replicas` | `2` | Logical GPUs advertised per physical card when `gpu_sharing: timeslicing` (must be >= 2) |
 | `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |
 | `object_storage` | `none` \| `managed` | Per-student bucket + bucket-scoped key |
 | `agent_deploy` | `none` \| `plain` | Ship the student's agent to their namespace (requires `cluster_access: scoped`) |
@@ -203,6 +206,7 @@ For the full breakdown, the sizing formula, and the GPU-plan decode, see [`infra
 - [`infra/docs/architecture.md`](infra/docs/architecture.md): the layers, the Helm chart, and what each value controls
 - [`infra/docs/sizing.md`](infra/docs/sizing.md): GPU-plan decode, the sizing formula, model catalog, and regions
 - [`infra/docs/cost.md`](infra/docs/cost.md): the `$/hr` breakdown and how to keep the bill down
+- [`infra/docs/gpu-sharing.md`](infra/docs/gpu-sharing.md): time-slicing for two models on one GPU (the module-07 lab)
 - [`examples/README.md`](examples/README.md): default content and how to bring your own
 - [`infra/docs/runbook.md`](infra/docs/runbook.md), [`infra/docs/security.md`](infra/docs/security.md), and [`infra/docs/troubleshooting.md`](infra/docs/troubleshooting.md): operations, security posture, and troubleshooting
 

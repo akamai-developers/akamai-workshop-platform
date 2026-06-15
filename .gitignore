@@ -238,3 +238,4 @@ PROMPT.md
 BUILD_PROGRESS.md
 build-logs/
 .build/
+infra/terraform/terraform.tfstate.*.backup

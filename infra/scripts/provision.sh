@@ -31,6 +31,14 @@ INFERENCE="${INFERENCE:-shared-vllm}"
 STUDENT_COUNT="$(grep -E '^student_count:' "${HELM_VALUES}" 2>/dev/null | head -1 | sed -E 's/[^0-9]//g')"
 STUDENT_COUNT="${STUDENT_COUNT:-1}"
 
+# Detect GPU sharing (time-slicing). When 'timeslicing', Step 3.5 patches the
+# gpu-operator ClusterPolicy so each physical GPU advertises N logical GPUs — what
+# lets a student run two vLLMs on one card. Default 'none' skips that step entirely.
+GPU_SHARING="$(grep -E '^gpu_sharing:' "${HELM_VALUES}" 2>/dev/null | head -1 | sed -E 's/^gpu_sharing:[[:space:]]*//; s/[[:space:]#].*$//')"
+GPU_SHARING="${GPU_SHARING:-none}"
+GPU_TS_REPLICAS="$(grep -E '^gpu_timeslicing_replicas:' "${HELM_VALUES}" 2>/dev/null | head -1 | sed -E 's/[^0-9]//g')"
+GPU_TS_REPLICAS="${GPU_TS_REPLICAS:-2}"
+
 echo "=== akamai-workshop-platform — Provisioning ==="
 echo ""
 
@@ -162,6 +170,69 @@ if [ "${GPU_NODES:-0}" -lt "${REQUIRED_GPU_NODES}" ]; then
     echo "ERROR: Only ${GPU_NODES}/${REQUIRED_GPU_NODES} nodes report nvidia.com/gpu after 15 min."
     echo "  kubectl -n gpu-operator get pods   # inspect operator pods"
     exit 1
+fi
+
+# Step 3.5: Enable NVIDIA time-slicing (gpu_sharing=timeslicing only).
+# By default each pod gets an exclusive GPU; time-slicing makes the device plugin
+# advertise N logical GPUs per card so a student can run two vLLMs on one GPU.
+# We apply this AFTER the operator is up by patching its ClusterPolicy — the terraform
+# gpu-operator install is untouched, so gpu_sharing=none clusters are unchanged.
+# Total allocatable nvidia.com/gpu across all nodes. Used to verify time-slicing.
+gpu_total() {
+    kubectl get nodes -o json | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(int(n['status']['allocatable'].get('nvidia.com/gpu','0')) for n in d['items']))" 2>/dev/null || echo "0"
+}
+
+if [ "${GPU_SHARING}" = "timeslicing" ]; then
+    echo ""
+    echo "--- Step 3.5: Enable GPU time-slicing (${GPU_TS_REPLICAS} logical GPUs/card) ---"
+    # Baseline = physical GPUs advertised cluster-wide BEFORE slicing. After slicing,
+    # every card advertises ${GPU_TS_REPLICAS}×, so the cluster total must rise to
+    # PRE × replicas. Checking the TOTAL (not a per-node ">= N") is correct whether a
+    # node has 1 or 4 physical GPUs, and can't false-pass on the pre-rollout device
+    # plugin: the total only reaches the target once the new plugin actually rolls.
+    PRE_GPU_TOTAL="$(gpu_total)"
+    TARGET_GPU_TOTAL=$(( PRE_GPU_TOTAL * GPU_TS_REPLICAS ))
+    kubectl apply -f - <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: time-slicing-config
+  namespace: gpu-operator
+data:
+  any: |-
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        resources:
+        - name: nvidia.com/gpu
+          replicas: ${GPU_TS_REPLICAS}
+YAML
+    CP="$(kubectl get clusterpolicy -o name 2>/dev/null | head -1)"
+    if [ -z "${CP}" ]; then
+        echo "ERROR: no gpu-operator ClusterPolicy found; cannot enable time-slicing."
+        exit 1
+    fi
+    kubectl patch "${CP}" --type merge \
+        -p '{"spec":{"devicePlugin":{"config":{"name":"time-slicing-config","default":"any"}}}}'
+    echo "    Patched ${CP} (cluster had ${PRE_GPU_TOTAL} GPUs; expect ${TARGET_GPU_TOTAL} after slicing)."
+    echo "    Waiting for the device plugin to roll and re-advertise..."
+    for i in $(seq 1 40); do
+        CUR_GPU_TOTAL="$(gpu_total)"
+        if [ "${CUR_GPU_TOTAL}" -ge "${TARGET_GPU_TOTAL}" ] && [ "${TARGET_GPU_TOTAL}" -gt 0 ]; then
+            echo "  ✓ cluster now advertises ${CUR_GPU_TOTAL} nvidia.com/gpu (${GPU_TS_REPLICAS}× of ${PRE_GPU_TOTAL})"
+            break
+        fi
+        echo "  …waiting (${i}/40) — nvidia.com/gpu: ${CUR_GPU_TOTAL}/${TARGET_GPU_TOTAL}"
+        sleep 15
+    done
+    if [ "${CUR_GPU_TOTAL:-0}" -lt "${TARGET_GPU_TOTAL}" ]; then
+        echo "ERROR: time-slicing did not take effect (cluster advertises ${CUR_GPU_TOTAL:-0}/${TARGET_GPU_TOTAL} nvidia.com/gpu) after 10 min."
+        echo "  kubectl describe ${CP}                       # check devicePlugin.config"
+        echo "  kubectl -n gpu-operator get pods             # device-plugin/gfd restart"
+        exit 1
+    fi
 fi
 
 # Step 4: Render + apply the shared cluster resources (namespace, networkpolicy,
