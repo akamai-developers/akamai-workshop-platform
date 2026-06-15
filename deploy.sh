@@ -517,7 +517,11 @@ fi
 # to the Jupyter image variant (jupyterlab + kubectl baked by build-workspace-image.sh).
 # code-server keeps the stock default, so the default path is unchanged.
 DEFAULT_CODE_SERVER_IMAGE="codercom/code-server:latest"
-DEFAULT_JUPYTER_IMAGE="ghcr.io/akamai-developers/ai-agents-workspace-jupyter:latest"
+# The prebuilt jupyter image (jupyterlab + kubectl baked) is the production path, but it
+# isn't published yet. Until it is, fall back to the stock image: startup.sh installs
+# jupyterlab + the workshop deps into the .venv and fetches kubectl when a scoped
+# kubeconfig is mounted, so jupyter mode works with no custom image build.
+DEFAULT_JUPYTER_IMAGE="codercom/code-server:latest"
 if [[ "$EDITOR" == "jupyter" && "$WORKSPACE_IMAGE" == "$DEFAULT_CODE_SERVER_IMAGE" ]]; then
     WORKSPACE_IMAGE="$DEFAULT_JUPYTER_IMAGE"
 fi

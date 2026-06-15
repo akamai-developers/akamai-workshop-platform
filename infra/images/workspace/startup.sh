@@ -200,6 +200,23 @@ VENV
   log ".venv auto-activation added to .bashrc"
 fi
 
+# --- 4b. kubectl for scoped workshops (the stock image has none) --------------
+# When a per-student kubeconfig is mounted (cluster_access=scoped) but kubectl is
+# absent, fetch the static binary into ~/.local/bin so the kubectl-tuning labs work
+# without the prebuilt jupyter image. No root needed.
+if [ -f "${HOME}/.kube/config" ] && ! command -v kubectl >/dev/null 2>&1; then
+  log "kubeconfig mounted but kubectl missing; installing kubectl into ~/.local/bin"
+  mkdir -p "${HOME}/.local/bin"
+  KVER="$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo v1.34.0)"
+  if curl -LsS "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "${HOME}/.local/bin/kubectl" 2>/dev/null \
+       && chmod +x "${HOME}/.local/bin/kubectl"; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+    log "kubectl ${KVER} installed"
+  else
+    log "WARN: kubectl download failed; kubectl labs need the prebuilt jupyter image"
+  fi
+fi
+
 # --- 5. Start the editor (code-server or jupyter) -----------------------------
 # In jupyter mode the workspace image bakes jupyterlab; as a best-effort fallback
 # for the stock-image/ConfigMap path, install it into the .venv if it is missing
