@@ -17,11 +17,53 @@ CONTENT_REPO_RAW="${CONTENT_REPO:-}"
 CONTENT_REF="${CONTENT_REF:-main}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${HOME:-/home/coder}/workshop}"
 BIND_ADDR="${BIND_ADDR:-0.0.0.0:8080}"
+# editor component: code-server (default) | jupyter. Both serve on port 8080.
+# A third value, "agent" (agent_deploy=plain), reuses this same clone-at-startup
+# path but launches the cloned repo's agent runner instead of an editor.
+WORKSPACE_TYPE="${WORKSPACE_TYPE:-code-server}"
 
 DEFAULT_ORG="akamai-developers"
 DEFAULT_REPO="ai-agents-workshop"
 
 log() { echo "[startup] $*"; }
+
+# Build the launch argv into the LAUNCH array based on WORKSPACE_TYPE. Both editors
+# bind 0.0.0.0:8080 (the ingress backend). code-server reads $PASSWORD itself;
+# jupyter maps $PASSWORD to its access token (so the same access card works).
+build_launch() {
+  case "${WORKSPACE_TYPE}" in
+    agent)
+      # agent_deploy=plain: run the cloned repo's agent entrypoint. "Modify" =
+      # `kubectl rollout restart`, which re-clones and re-runs run-agent.sh. If the
+      # repo ships no runner yet, idle (with a log) instead of crash-looping.
+      if [ -f "${WORKSPACE_DIR}/run-agent.sh" ]; then
+        LAUNCH=(bash "${WORKSPACE_DIR}/run-agent.sh")
+      else
+        log "agent mode: no run-agent.sh in ${WORKSPACE_DIR}; idling (kubectl rollout restart after adding one)"
+        LAUNCH=(sleep infinity)
+      fi
+      ;;
+    jupyter)
+      LAUNCH=(jupyter lab
+        --ServerApp.ip=0.0.0.0 --ServerApp.port=8080 --no-browser
+        --ServerApp.token="${PASSWORD:-}" --ServerApp.password=
+        --ServerApp.allow_remote_access=True
+        --ServerApp.disable_check_xsrf=True
+        --ServerApp.root_dir="${WORKSPACE_DIR}")
+      ;;
+    *)
+      LAUNCH=(code-server --bind-addr "${BIND_ADDR}" --auth password "${WORKSPACE_DIR}")
+      ;;
+  esac
+}
+
+# Test hook: print the resolved launch command and exit, without side effects.
+# Used by tests/bats/startup.bats to assert the WORKSPACE_TYPE branch selection.
+if [ -n "${WORKSPACE_PRINT_LAUNCH:-}" ]; then
+  build_launch
+  printf '%s\n' "${LAUNCH[*]}"
+  exit 0
+fi
 
 # Coerce whatever CONTENT_REPO shape we were handed into a clonable git URL.
 # Accepts: "" (→ the default workshop), a full URL (https/ssh/scp — used as-is), an
@@ -158,9 +200,43 @@ VENV
   log ".venv auto-activation added to .bashrc"
 fi
 
-# --- 5. Start code-server ----------------------------------------------------
-log "starting code-server on ${BIND_ADDR} (workspace: ${WORKSPACE_DIR})"
+# --- 4b. kubectl for scoped workshops (the stock image has none) --------------
+# When a per-student kubeconfig is mounted (cluster_access=scoped) but kubectl is
+# absent, fetch the static binary into ~/.local/bin so the kubectl-tuning labs work
+# without the prebuilt jupyter image. No root needed.
+if [ -f "${HOME}/.kube/config" ] && ! command -v kubectl >/dev/null 2>&1; then
+  log "kubeconfig mounted but kubectl missing; installing kubectl into ~/.local/bin"
+  mkdir -p "${HOME}/.local/bin"
+  KVER="$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo v1.34.0)"
+  if curl -LsS "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "${HOME}/.local/bin/kubectl" 2>/dev/null \
+       && chmod +x "${HOME}/.local/bin/kubectl"; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+    log "kubectl ${KVER} installed"
+  else
+    log "WARN: kubectl download failed; kubectl labs need the prebuilt jupyter image"
+  fi
+fi
+
+# --- 5. Start the editor (code-server or jupyter) -----------------------------
+# In jupyter mode the workspace image bakes jupyterlab; as a best-effort fallback
+# for the stock-image/ConfigMap path, install it into the .venv if it is missing
+# (mirrors the Python install above). The dedicated jupyter image is the supported path.
+if [ "${WORKSPACE_TYPE}" = "jupyter" ] && ! command -v jupyter >/dev/null 2>&1; then
+  if [ -x "${WORKSPACE_DIR}/.venv/bin/jupyter" ]; then
+    export PATH="${WORKSPACE_DIR}/.venv/bin:${PATH}"
+  elif command -v uv >/dev/null 2>&1 && [ -d "${WORKSPACE_DIR}/.venv" ]; then
+    log "jupyter not found; installing jupyterlab into .venv (best-effort)"
+    if uv pip install --python "${WORKSPACE_DIR}/.venv/bin/python" --no-cache jupyterlab >/dev/null 2>&1; then
+      export PATH="${WORKSPACE_DIR}/.venv/bin:${PATH}"
+    else
+      log "WARN: jupyterlab install failed; use the jupyter workspace image"
+    fi
+  fi
+fi
+
+build_launch
+log "starting ${WORKSPACE_TYPE} on 0.0.0.0:8080 (workspace: ${WORKSPACE_DIR})"
 if [ -n "${VLLM_HOST:-}" ]; then log "VLLM_HOST=${VLLM_HOST}"; fi
 if [ -n "${MODEL_NAME:-}" ]; then log "MODEL_NAME=${MODEL_NAME}"; fi
 if [ -n "${MODEL_NAMES:-}" ]; then log "MODEL_NAMES=${MODEL_NAMES}"; fi
-exec code-server --bind-addr "${BIND_ADDR}" --auth password "${WORKSPACE_DIR}"
+exec "${LAUNCH[@]}"

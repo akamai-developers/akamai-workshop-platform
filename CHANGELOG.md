@@ -3,6 +3,165 @@
 All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased — Component-based workshops (`feat/jupyter-own-inference`)
+
+Extending the platform additively, behind flags that default to today's behaviour, so
+one classroom machinery composes multiple workshop shapes (PLAN.md). The default
+`code-server` + `shared-vllm` path stays byte-identical.
+
+### Phase 6 — Example configs + operator affordances
+- **`examples/own-inference.yaml`** (jupyter + dedicated-vllm + 1 GPU/student + scoped +
+  agent_deploy:plain) and **`examples/sa-agent.yaml`** (jupyter + shared-vllm/external + scoped
+  + agent_deploy:plain + object_storage:managed) — fully commented, mirroring
+  `config.example.yaml`. A workshop is now a config file, not new code.
+- **`Makefile`**: `make verify-default` (helm golden diff + sizing self-test) and
+  `make verify-config CONFIG=...` (dry-run + validate a config); documented the
+  `make deploy ARGS="--config examples/…"` invocation.
+- **Access cards**: when `cluster_access: scoped` or `object_storage: managed`, both card
+  generators (`print-access-cards.sh`, `generate-cards.py`) add a NON-SECRET "pre-wired" note
+  (the student's namespace + that a kubeconfig/bucket is ready) — auto-detected from the
+  generated `helm-values.yaml`. The default card and the `access-cards.csv` are unchanged when
+  those components are off.
+- **README**: documented the two example workshops, the verify targets, and the access-card note.
+- **Verification (offline)**: both example configs dry-run into coherent plans; `make
+  verify-default` green; the default dry-run stays byte-identical.
+
+### Phase 5 — `inference: dedicated-vllm` (1 GPU) + `inference: external` + component-aware sizing
+- **`infra/helm/templates/student-vllm.yaml`** (new, gated on `inference=dedicated-vllm` AND
+  `cluster_access=scoped`): one **deliberately under-tuned** vLLM per student
+  (`--gpu-memory-utilization=0.4`, `--max-model-len=2048`) as a `Deployment`+`PVC`+`Service`
+  in the student's namespace, pinned to a GPU node (`pool: gpu`, `nvidia.com/gpu: 1`). The
+  Service is named `vllm` so the in-namespace workspace short name resolves. One-per-node is
+  enforced by GPU scarcity (single-GPU nodes). New under-tune knobs in `values.yaml`
+  (`dedicated_gpu_memory_util`, `dedicated_max_model_len`).
+- **Shared vLLM gating**: `vllm-statefulset.yaml`/`vllm-service.yaml` now render only for
+  `inference=shared-vllm`, so `dedicated-vllm`/`external` deploy no shared vLLM. Default
+  (shared-vllm) render is byte-identical.
+- **`inference: external`**: deploys NO platform vLLM. `terraform/main.tf` drops the GPU pool
+  when `gpu_node_count=0`; the workspace env points at a user-supplied
+  `--inference-endpoint` (+ optional `--inference-api-key`).
+- **`sizing.py` component-aware**: `dedicated-vllm` → GPU nodes = `students × 1` + per-student
+  cost (not `students/16`); `external` → 0 GPU nodes and the cost preview omits the GPU line;
+  `--editor jupyter` labels CPU nodes "workspaces" not "code-servers". New `selftest` cases for
+  dedicated + external. `shared-vllm` + `code-server` output is byte-identical.
+- **`deploy.sh`**: threads `--inference/--gpus-per-student/--editor` into sizing; component-aware
+  preview (dedicated per-student line, external endpoint line); enforces `dedicated-vllm ⇒
+  scoped` and `external ⇒ endpoint`; `inference_endpoint`/`inference_api_key` config keys; flags
+  preserved across the "Change sizing" re-exec.
+- **Verification (offline)**: 11 new `tests/bats/inference.bats` (helm gating, sizing modes,
+  deploy validation), `kubeconform` on dedicated/external renders, `sizing.py selftest`, both
+  goldens + the default dry-run byte-identical. Real GPU scheduling is **not** verifiable
+  offline (pods stay Pending in kind) — covered by the Phase-7 smoke (dedicated-vllm, 1 GPU).
+
+### Phase 4 — `object_storage: managed`
+- **`infra/scripts/provision-object-storage.sh`** (new): per-student bucket + a
+  **bucket-scoped limited key** (read_write, locked to one bucket — that scoping *is* the
+  isolation; students never get the operator token). Emits a per-student `ws-NN-object-storage`
+  Secret with the SA-agent env vars (`AWS_ACCESS_KEY_ID/SECRET`, `SESSION_BUCKET/ENDPOINT_URL/REGION`).
+  Resolves the **region id** (`us-ord`) from `clusters-list`, never the cluster id (`us-ord-1`).
+  Idempotent via a gitignored `generated/object-storage.csv` (re-runs preserve buckets/keys,
+  like passwords). A `--teardown` mode revokes every key + empties/deletes every bucket
+  **filtered by the run-label prefix**.
+- **Teardown wired in** (account-level resources survive `terraform destroy`):
+  `teardown.sh` Step 1b and the `e2e-smoke.sh` EXIT trap both invoke `--teardown` —
+  idempotent and prefix-filtered, a clean no-op when no buckets were provisioned.
+- **`workspace-pod-template.yaml` + `generate-pods.sh`**: `--object-storage managed` wires the
+  per-student Secret into the workspace pod (and the deployed agent) via `envFrom … optional:
+  true` at the new `__OBJECT_STORAGE_ENVFROM__` sentinel. Default (`none`) drops the sentinel
+  so the pod manifest stays byte-identical.
+- **`deploy.sh`**: provisions Object Storage after generate-pods when `object_storage=managed`
+  (prefix = the unique cluster label); threads `--object-storage` into generate-pods.
+- **Verification (offline):** 12 new `tests/bats/object-storage.bats` (bucket-scoped key create,
+  region-id resolution, idempotent re-run, prefix-filtered teardown revoke+delete, envFrom
+  wiring) against the fake `linode-cli`; rendered Secrets pass `kubeconform`; both goldens
+  unchanged. Real bucket/key provisioning is **not** in the paid smoke.
+
+### Phase 3 — `cluster_access: scoped` + `agent_deploy: plain`
+- **`infra/helm/templates/student-namespaces.yaml`** (gated on `cluster_access=scoped`):
+  per-student `Namespace` (`workshop-sNN`), `student` `ServiceAccount`, and a **namespaced**
+  `Role`/`RoleBinding` — write on workloads + `pods/portforward`/`pods/exec`, **no
+  cluster-scoped verbs**. The control-plane fence.
+- **`infra/helm/templates/student-networkpolicy.yaml`** (gated): per-namespace default-deny
+  ingress + narrow allows (ingress-nginx→workspace, workspace→own-namespace vLLM, and
+  ingress-nginx→agent when `agent_deploy` is set). The data-plane fence. The shared
+  single-namespace policy renders byte-identical when `cluster_access=none`.
+- **`infra/scripts/generate-kubeconfig.sh`** (new): mints a bound, namespace-scoped SA
+  token per student (`kubectl create token`, default 30-day TTL) and emits a
+  `ws-NN-kubeconfig` Secret (default context = the student's namespace). The operator admin
+  kubeconfig is never shipped into a workspace.
+- **`infra/scripts/generate-pods.sh` + `workspace-pod-template.yaml`**: scoped mode places
+  each student's workspace pod, Service, password Secret, startup ConfigMap, and a
+  self-contained Ingress in their own namespace, and mounts the scoped kubeconfig at
+  `~/.kube` (`__KUBECONFIG_MOUNT__`/`__KUBECONFIG_VOLUME__` sentinels, dropped for the
+  default so the pod manifest stays byte-identical). `agent_deploy: plain` emits a
+  per-student agent `Deployment`+`Service` (workspace image + clone-at-startup,
+  `WORKSPACE_TYPE=agent`) behind an `agent-sNN.<host>` ingress. New
+  `--cluster-access`/`--agent-deploy` flags; `OUTPUT_DIR` is overridable for tests.
+- **`startup.sh`**: added a `WORKSPACE_TYPE=agent` launch branch (runs the repo's
+  `run-agent.sh`, else idles) reusing the existing clone-at-startup path.
+- **`deploy.sh`**: threads `--cluster-access`/`--agent-deploy` into `generate-pods.sh`,
+  points scoped + shared-vllm workspaces at the FQDN vLLM service, runs
+  `generate-kubeconfig.sh`, and replicates the wildcard `workshop-tls` secret into each
+  student namespace (per-namespace Ingresses need a co-located cert).
+- **Tests**: `tests/bats/cluster-access.bats` (10 cases — scoped RBAC/NetworkPolicy render,
+  no cluster-scoped verbs, per-namespace generate-pods, agent deployment, scoped kubeconfig
+  via a new `tests/fakes/kubectl`); `tests/phase3-isolation-check.sh` (kind+Cilium
+  allow-then-deny + RBAC-Forbidden proof — **deferred** while host disk is full, ready to
+  run). Verified offline: both goldens hold (pods golden recaptured for the agent branch),
+  helm scoped render passes kubeconform (23/23), 25/25 bats, shellcheck/yamllint clean.
+
+### Phase 2 — `editor: jupyter`
+- **`infra/images/workspace/startup.sh`**: branched the launch on `WORKSPACE_TYPE`
+  (default `code-server`). `jupyter` runs `jupyter lab` on `0.0.0.0:8080` with `$PASSWORD`
+  mapped to the access token (the same access card works). Added a best-effort jupyterlab
+  install into the `.venv` for the stock-image/ConfigMap path. The code-server runtime
+  path is behaviorally unchanged; a `WORKSPACE_PRINT_LAUNCH` test hook prints the resolved
+  command without starting a server.
+- **`infra/images/workspace/Dockerfile.jupyter`**: a Jupyter image variant — jupyterlab +
+  python + git + **kubectl on PATH** (for `cluster_access: scoped`), non-root `coder`
+  (UID 1000), `startup.sh` entrypoint. `build-workspace-image.sh` builds it via
+  `VARIANT=jupyter` (its own image name, `-f Dockerfile.jupyter`).
+- **`infra/manifests/workspace-pod-template.yaml` + `generate-pods.sh`**: thread
+  `workspace_type` via a `__WORKSPACE_TYPE_ENV__` sentinel. For code-server the sentinel
+  line is deleted (pod manifest byte-identical to golden); for jupyter it becomes a
+  `WORKSPACE_TYPE` env. `deploy.sh` passes `--workspace-type` and, when `editor=jupyter`
+  with no image override, defaults the workspace image to the Jupyter variant.
+- **`tests/bats/startup.bats`**: asserts the launch-branch selection.
+- Verified offline: code-server pod manifest byte-identical, both goldens hold, jupyter
+  manifest passes kubeconform, 15/15 bats. Docker build of the jupyter image is DEFERRED
+  (local disk full); the Dockerfile + build wiring are in place.
+
+### Phase 1 — Component flags + config plumbing
+- **`infra/helm/values.yaml`**: added the component catalog keys (`editor`, `inference`,
+  `gpus_per_student`, `cluster_access`, `object_storage`, `agent_deploy`), each defaulting
+  to today's behavior. No template references them yet, so the default render is unchanged.
+- **`deploy.sh`**: `load_config` allowlist + arg parser now accept the component keys
+  (`--editor`/`--workspace-type`, `--inference`, `--gpus-per-student`, `--cluster-access`,
+  `--object-storage`, `--agent-deploy`). Added enum + dependency validation (reserved
+  values `kagent` / `gpus_per_student: 2` / `own-account` are rejected with a clear v2
+  message; `agent_deploy` requires `cluster_access: scoped`). The deploy preview gained a
+  **Components** block shown only when the composition differs from default — so the default
+  dry-run plan is byte-identical. "Change sizing" re-exec now preserves the components, and
+  the generated helm overrides carry them for later phases.
+- **`config.example.yaml`**: documented the component catalog; fixed the stale "5 questions"
+  header (the wizard is 6 steps).
+- **`infra/docs/security.md`**: fixed `openssl rand -hex 4` → `-hex 16` (matches the script).
+- **`README.md`**: added a Component model section.
+- **`tests/bats/components.bats`**: round-trip + validation gates (all offline via dry-run).
+
+### Phase 0 — Build environment + guardrails (no product code)
+- **`.build/golden/`**: captured the default-behaviour baselines BEFORE any component
+  keys exist — `default-helm.yaml` (`helm template infra/helm`) and
+  `default-pods.masked.yaml` (a deterministic `generate-pods.sh -n 2 --host fixed.example`
+  render with random passwords masked). These are the #1 regression gate.
+- **`tests/`**: offline test harness — `fakes/linode-cli` + `fakes/curl` shims (log
+  invocations, simulate API errors), `bats/helper.bash` + `bats/smoke.bats`,
+  `kind-cluster.yaml` (Cilium CNI + kube-proxy replacement, mirroring LKE), and
+  `cilium-enforcement-check.sh` (positive-control allow-then-deny NetworkPolicy proof).
+- **`.yamllint.yaml`**: lint config matching the repo's existing YAML style.
+- **`infra/docs/dev.md`**: toolchain setup, the offline gate commands, kind+Cilium usage,
+  and how to recapture the golden snapshots.
+
 ## 2026-06-08 — Multi-model support with agentgateway routing
 
 Added multi-model deployment support: instructors can select 2+ models (comma-separated),

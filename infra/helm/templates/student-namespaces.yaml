@@ -1,0 +1,71 @@
+{{- /*
+cluster_access: scoped — one namespace per student, each with a ServiceAccount and a
+NAMESPACED Role/RoleBinding. This is the control-plane fence: a student's scoped
+kubeconfig (minted by generate-kubeconfig.sh from this SA's token) can administer ONLY
+its own namespace. The Role has NO cluster-scoped verbs (no nodes/namespaces/RBAC), so
+`kubectl get nodes` and cross-namespace access are Forbidden.
+
+Gated on cluster_access=scoped, so the default (none) render is byte-identical (this
+whole file produces nothing). Per-student namespace name: <namespace>-sNN.
+*/ -}}
+{{- if eq .Values.cluster_access "scoped" }}
+{{- $root := . }}
+{{- range $n := untilStep 1 (int (add .Values.student_count 1)) 1 }}
+{{- $ns := printf "%s-s%02d" $root.Values.namespace $n }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    app: akamai-workshop-platform
+    awp-student: "true"
+    awp-student-number: "{{ $n }}"
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: student
+  namespace: {{ $ns }}
+  labels:
+    app: akamai-workshop-platform
+    awp-student-number: "{{ $n }}"
+---
+# Namespaced Role: manage your OWN namespace only. No cluster-scoped resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: student
+  namespace: {{ $ns }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, configmaps, secrets, persistentvolumeclaims, events]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/portforward, pods/exec]
+    verbs: [create, get]
+  - apiGroups: [apps]
+    # deployments/scale + statefulsets/scale are SEPARATE RBAC subresources from the
+    # parent object; without them `kubectl scale deploy/...` is Forbidden even though
+    # `update deployments` is allowed. The optimize/two-models labs scale their own vLLM.
+    resources: [deployments, deployments/scale, statefulsets, statefulsets/scale, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: student
+  namespace: {{ $ns }}
+subjects:
+  - kind: ServiceAccount
+    name: student
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: student
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}

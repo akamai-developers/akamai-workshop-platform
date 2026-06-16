@@ -61,3 +61,54 @@ gateway_api_key: ""
 workspace_image: ghcr.io/akamai-developers/ai-agents-workspace:latest
 vllm_host: http://vllm:8000/v1
 content_repo: ""   # "" → default ai-agents-workshop (resolved by startup.sh)
+
+# --- Component catalog (PLAN.md) ---
+# A workshop is a *composition* of these per-student components, selected once per
+# classroom by the operator. EVERY default below is today's behavior, so a deploy
+# with none of these set renders byte-identically to the original platform. New
+# behavior is added behind these flags (the multi_model switch above is the
+# precedent). Templates/scripts MUST gate on "differs from default" so the default
+# path never changes.
+#
+# editor: the workspace UI. code-server (today) | jupyter.
+editor: code-server
+# inference: where the model comes from.
+#   shared-vllm (today, ~16 students/replica) | dedicated-vllm (one under-tuned vLLM
+#   per student on their own GPU) | external (no platform vLLM; bring your own endpoint).
+inference: shared-vllm
+# gpus_per_student: only meaningful when inference=dedicated-vllm. 1 (default).
+#   2 is RESERVED for v2 (two-models + agentgateway routing) — not built yet.
+gpus_per_student: 1
+# gpu_sharing: how one physical GPU is shared. none (today: the NVIDIA device plugin
+#   gives each pod an exclusive GPU) | timeslicing (turn on NVIDIA time-slicing so more
+#   than one pod can land on a single card). timeslicing is what lets a student run TWO
+#   vLLMs on their one GPU (the two-models-on-one-GPU lab). mps is RESERVED for v2.
+#   Applied by provision.sh AFTER the operator is up (it patches the gpu-operator
+#   ClusterPolicy); the terraform gpu-operator install is untouched, so the default
+#   (none) render + cluster are byte-identical to today.
+gpu_sharing: none
+# gpu_sharing=timeslicing only: logical GPUs advertised per physical card. 2 fits the
+#   two-models lab (each server at ~0.45 GPU-memory-util); raise for more co-tenant pods.
+gpu_timeslicing_replicas: 2
+# dedicated-vllm only: the per-student vLLM is DELIBERATELY under-tuned so the
+# saturate/optimize lab has something to fix. Students raise these via kubectl.
+# 0.7 (not lower): must still LOAD weights + minimal KV on a 20 GB card, else vLLM
+# crashes at startup ("no available memory for cache blocks"). Students raise toward 0.9.
+dedicated_gpu_memory_util: 0.7
+dedicated_max_model_len: 2048
+# The per-student vLLM runs on a SMALL single-GPU node (g2-gpu-rtx4000a1-s = 4 vCPU / 16 GB,
+# ~3.9 CPU / ~12.9 Gi allocatable after daemonsets). The shared vLLM's 4 CPU / 16 Gi requests
+# do NOT fit (pod stays Pending: Insufficient cpu/memory), so the dedicated path requests less —
+# the GPU does the work; the host process needs little.
+dedicated_vllm_cpu_request: "2"
+dedicated_vllm_mem_request: "8Gi"
+# cluster_access: none (today) | scoped (per-student namespace + scoped kubeconfig +
+#   per-namespace NetworkPolicy). "scoped" is what gives students in-notebook kubectl.
+cluster_access: none
+# object_storage: none (today) | managed (per-student bucket + bucket-scoped key).
+#   own-account is RESERVED for v2.
+object_storage: none
+# agent_deploy: ship-the-agent-to-k8s capability (requires cluster_access=scoped).
+#   none (today) | plain (Deployment+Service behind the per-student ingress).
+#   kagent is RESERVED for v2 (Agent CRD + controller) — enum value only, no code.
+agent_deploy: none

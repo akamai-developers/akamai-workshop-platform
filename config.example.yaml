@@ -3,13 +3,31 @@
 # The Linode token is NOT here — export it instead:  export TF_VAR_token=...
 # Anything you omit is filled by the wizard's autopilot. Flags override these.
 
-# --- The 5 questions ---
+# --- The 6 wizard questions (name, students, model, content, domain, region) ---
+# label sets the deployment name (the wizard's first prompt); the rest map 1:1.
 students:     80
 model:        Qwen/Qwen3-8B-FP8     # ungated only; see `infra/scripts/sizing.py catalog`
 # models:     "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"  # multi-model: comma-separated, deploys agentgateway
 content_repo: ""                     # "" → default github.com/akamai-developers/ai-agents-workshop
 domain:       ""                     # "" → sslip.io + self-signed TLS; else Linode DNS + Let's Encrypt
 region:       us-ord                 # "" → wizard lists live GPU regions (see `infra/scripts/regions.sh list`)
+
+# --- Component catalog (PLAN.md) — config-only; the wizard never prompts for these ---
+# A workshop is a composition of per-student components. EVERY default below is
+# today's behavior, so omitting all of them deploys exactly the original platform.
+# See examples/ for ready-made workshop compositions.
+# editor:          code-server        # code-server (default) | jupyter
+# inference:       shared-vllm        # shared-vllm (default) | dedicated-vllm | external
+# gpus_per_student: 1                 # only for dedicated-vllm; 1 (default). 2 = reserved/v2
+# gpu_sharing:     none               # none (default) | timeslicing (two vLLMs share one card; needs dedicated-vllm)
+# gpu_timeslicing_replicas: 2         # logical GPUs/card when gpu_sharing: timeslicing (>= 2)
+# cluster_access:  none               # none (default) | scoped (per-student ns + kubeconfig + NetworkPolicy)
+# object_storage:  none               # none (default) | managed (per-student bucket + scoped key)
+# agent_deploy:    none               # none (default) | plain (needs cluster_access: scoped). kagent = reserved/v2
+# inference_endpoint: ""              # REQUIRED for inference: external — OpenAI-compatible URL the workshop calls
+# inference_api_key:  ""              # optional bearer key for inference_endpoint (external only)
+# Notes: dedicated-vllm requires cluster_access: scoped (each student's vLLM lives in
+#   their namespace). external deploys NO platform vLLM and provisions zero GPU nodes.
 
 # --- Optional overrides (autopilot fills these from students + model) ---
 # gpu_node_type:        g2-gpu-rtx4000a4-s

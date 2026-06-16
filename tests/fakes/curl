@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake `curl` for offline bats tests. Logs the invocation and returns canned
+# output / exit codes set by the test via env. Just enough to stand in for the
+# small number of curl calls the provisioning + startup scripts make.
+set -uo pipefail
+
+LOG="${FAKE_CURL_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "$LOG"
+
+if [[ -n "${FAKE_CURL_FAIL:-}" ]]; then
+  echo "${FAKE_CURL_STDERR:-fake curl forced failure}" >&2
+  exit "${FAKE_CURL_FAIL}"
+fi
+
+printf '%s' "${FAKE_CURL_OUT:-}"

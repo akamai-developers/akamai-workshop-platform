@@ -1,4 +1,7 @@
-{{- if not .Values.multi_model }}
+{{- /* The shared single vLLM renders only for inference=shared-vllm (today's default).
+       dedicated-vllm puts one under-tuned vLLM in each student namespace (student-vllm.yaml);
+       external uses a user-supplied endpoint and deploys no platform vLLM. */ -}}
+{{- if and (not .Values.multi_model) (eq .Values.inference "shared-vllm") }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

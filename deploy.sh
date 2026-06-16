@@ -58,6 +58,19 @@ NAMESPACE="workshop"
 WORKSPACE_IMAGE="codercom/code-server:latest"
 MAX_MODEL_LEN="32768"
 GPU_MEMORY_UTIL="0.9"
+# Component catalog (PLAN.md). Empty here; defaults applied after parsing so a
+# config/flag can set them. Every default equals today's behavior — a deploy that
+# sets none of these is byte-identical to the original platform.
+EDITOR=""            # code-server (default) | jupyter
+INFERENCE=""         # shared-vllm (default) | dedicated-vllm | external
+GPUS_PER_STUDENT=""  # 1 (default); 2 reserved/v2
+GPU_SHARING=""       # none (default) | timeslicing; mps reserved/v2
+GPU_TIMESLICING_REPLICAS=""  # logical GPUs/card when gpu_sharing=timeslicing (default 2)
+CLUSTER_ACCESS=""    # none (default) | scoped
+OBJECT_STORAGE=""    # none (default) | managed
+AGENT_DEPLOY=""      # none (default) | plain; kagent reserved/v2
+INFERENCE_ENDPOINT="" # inference=external only: user-supplied OpenAI-compatible URL
+INFERENCE_API_KEY=""  # inference=external only: bearer key for that endpoint
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -198,6 +211,13 @@ keys = {
  "label":"LABEL","k8s_version":"K8S_VERSION","subdomain_prefix":"SUBDOMAIN_PREFIX",
  "cert_email":"CERT_EMAIL","allowed_cidr":"ALLOWED_CIDR","namespace":"NAMESPACE",
  "workspace_image":"WORKSPACE_IMAGE","max_model_len":"MAX_MODEL_LEN","gpu_memory_util":"GPU_MEMORY_UTIL",
+ # Component catalog (editor accepts the legacy alias workspace_type too).
+ "editor":"EDITOR","workspace_type":"EDITOR","inference":"INFERENCE",
+ "gpus_per_student":"GPUS_PER_STUDENT","gpu_sharing":"GPU_SHARING",
+ "gpu_timeslicing_replicas":"GPU_TIMESLICING_REPLICAS",
+ "cluster_access":"CLUSTER_ACCESS",
+ "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
+ "inference_endpoint":"INFERENCE_ENDPOINT","inference_api_key":"INFERENCE_API_KEY",
 }
 for raw in open(sys.argv[1]):
     line = raw.split("#",1)[0].rstrip()
@@ -238,6 +258,16 @@ while [[ $# -gt 0 ]]; do
         --workspace-image)   WORKSPACE_IMAGE="$2"; shift 2 ;;
         --max-model-len)     MAX_MODEL_LEN="$2"; shift 2 ;;
         --gpu-memory-util)   GPU_MEMORY_UTIL="$2"; shift 2 ;;
+        --editor|--workspace-type) EDITOR="$2"; shift 2 ;;
+        --inference)         INFERENCE="$2"; shift 2 ;;
+        --gpus-per-student)  GPUS_PER_STUDENT="$2"; shift 2 ;;
+        --gpu-sharing)       GPU_SHARING="$2"; shift 2 ;;
+        --gpu-timeslicing-replicas) GPU_TIMESLICING_REPLICAS="$2"; shift 2 ;;
+        --cluster-access)    CLUSTER_ACCESS="$2"; shift 2 ;;
+        --object-storage)    OBJECT_STORAGE="$2"; shift 2 ;;
+        --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
+        --inference-endpoint) INFERENCE_ENDPOINT="$2"; shift 2 ;;
+        --inference-api-key)  INFERENCE_API_KEY="$2"; shift 2 ;;
         -y|--yes)            ASSUME_YES=1; shift ;;
         --dry-run)           DRY_RUN=1; shift ;;
         --list-models)       python3 "${SCRIPTS}/sizing.py" catalog; exit 0 ;;
@@ -443,10 +473,95 @@ case "$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')" in
     no|n|none|false|off) DOMAIN="" ;;
 esac
 
+# ---- Component catalog: defaults (= today's behavior) + validation ----
+# Every default below is the original platform's shape, so a deploy with no
+# component flags is byte-identical to today. Reserved/v2 values are rejected
+# with a clear message rather than silently doing nothing.
+EDITOR="${EDITOR:-code-server}"
+INFERENCE="${INFERENCE:-shared-vllm}"
+GPUS_PER_STUDENT="${GPUS_PER_STUDENT:-1}"
+GPU_SHARING="${GPU_SHARING:-none}"
+GPU_TIMESLICING_REPLICAS="${GPU_TIMESLICING_REPLICAS:-2}"
+CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
+OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
+AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
+
+case "$EDITOR" in code-server|jupyter) ;; *) err "editor must be 'code-server' or 'jupyter' (got '$EDITOR')" ;; esac
+case "$INFERENCE" in
+    shared-vllm|dedicated-vllm|external) ;;
+    *) err "inference must be 'shared-vllm', 'dedicated-vllm', or 'external' (got '$INFERENCE')" ;;
+esac
+case "$CLUSTER_ACCESS" in none|scoped) ;; *) err "cluster_access must be 'none' or 'scoped' (got '$CLUSTER_ACCESS')" ;; esac
+case "$OBJECT_STORAGE" in
+    none|managed) ;;
+    own-account) err "object_storage 'own-account' is reserved for v2 and not implemented yet." ;;
+    *) err "object_storage must be 'none' or 'managed' (got '$OBJECT_STORAGE')" ;;
+esac
+case "$AGENT_DEPLOY" in
+    none|plain) ;;
+    kagent) err "agent_deploy 'kagent' is reserved for v2 (Agent CRD + controller not built yet). Use 'plain'." ;;
+    *) err "agent_deploy must be 'none' or 'plain' (got '$AGENT_DEPLOY')" ;;
+esac
+case "$GPUS_PER_STUDENT" in
+    1) ;;
+    2) err "gpus_per_student '2' is reserved for v2 (two-models + agentgateway routing). Use 1." ;;
+    *) err "gpus_per_student must be 1 (got '$GPUS_PER_STUDENT')" ;;
+esac
+case "$GPU_SHARING" in
+    none|timeslicing) ;;
+    mps) err "gpu_sharing 'mps' is reserved for v2 (not built yet). Use 'timeslicing'." ;;
+    *) err "gpu_sharing must be 'none' or 'timeslicing' (got '$GPU_SHARING')" ;;
+esac
+case "$GPU_TIMESLICING_REPLICAS" in
+    ''|*[!0-9]*) err "gpu_timeslicing_replicas must be a positive integer (got '$GPU_TIMESLICING_REPLICAS')" ;;
+    *) [[ "$GPU_TIMESLICING_REPLICAS" -lt 2 ]] && err "gpu_timeslicing_replicas must be >= 2 (got '$GPU_TIMESLICING_REPLICAS'); time-slicing only matters when a card hosts 2+ pods." ;;
+esac
+# Time-slicing only earns its keep on the per-student dedicated GPU (lets a student run
+# two vLLMs on one card — the two-models lab). It's a no-op for shared/external inference.
+if [[ "$GPU_SHARING" == "timeslicing" && "$INFERENCE" != "dedicated-vllm" ]]; then
+    err "gpu_sharing='timeslicing' requires inference='dedicated-vllm' (it shares each student's own GPU)."
+fi
+# Dependencies (PLAN.md): shipping an agent needs a namespace to ship into.
+if [[ "$AGENT_DEPLOY" != "none" && "$CLUSTER_ACCESS" != "scoped" ]]; then
+    err "agent_deploy='$AGENT_DEPLOY' requires cluster_access='scoped' (the agent ships into the student's namespace)."
+fi
+# dedicated-vllm places one vLLM in each student's namespace, so it needs per-student
+# namespaces (cluster_access=scoped). The helm template gates on both.
+if [[ "$INFERENCE" == "dedicated-vllm" && "$CLUSTER_ACCESS" != "scoped" ]]; then
+    err "inference='dedicated-vllm' requires cluster_access='scoped' (the per-student vLLM lives in the student's namespace)."
+fi
+# external deploys no platform vLLM, so the workshop must point at a real endpoint.
+if [[ "$INFERENCE" == "external" && -z "$INFERENCE_ENDPOINT" ]]; then
+    err "inference='external' requires --inference-endpoint <url> (the OpenAI-compatible endpoint the workshop calls)."
+fi
+
+# When editor=jupyter and the operator hasn't overridden the workspace image, default
+# to the Jupyter image variant (jupyterlab + kubectl baked by build-workspace-image.sh).
+# code-server keeps the stock default, so the default path is unchanged.
+DEFAULT_CODE_SERVER_IMAGE="codercom/code-server:latest"
+# The prebuilt jupyter image (jupyterlab + kubectl baked) is the production path, but it
+# isn't published yet. Until it is, fall back to the stock image: startup.sh installs
+# jupyterlab + the workshop deps into the .venv and fetches kubectl when a scoped
+# kubeconfig is mounted, so jupyter mode works with no custom image build.
+DEFAULT_JUPYTER_IMAGE="codercom/code-server:latest"
+if [[ "$EDITOR" == "jupyter" && "$WORKSPACE_IMAGE" == "$DEFAULT_CODE_SERVER_IMAGE" ]]; then
+    WORKSPACE_IMAGE="$DEFAULT_JUPYTER_IMAGE"
+fi
+
+# True when the requested composition differs from the default platform shape.
+components_nondefault() {
+    [[ "$EDITOR" != "code-server" || "$INFERENCE" != "shared-vllm" \
+       || "$GPU_SHARING" != "none" \
+       || "$CLUSTER_ACCESS" != "none" || "$OBJECT_STORAGE" != "none" \
+       || "$AGENT_DEPLOY" != "none" ]]
+}
+
 # ---- Sizing (autopilot + any explicit overrides) ----
 if [[ $MULTI_MODEL -eq 0 ]]; then
-    # Single-model path: identical to original.
-    SIZING_ARGS=(plan --students "$STUDENTS" --model "$MODEL" --json)
+    # Single-model path. Component-aware: dedicated-vllm/external reshape the GPU
+    # footprint; shared-vllm + code-server is byte-identical to the original.
+    SIZING_ARGS=(plan --students "$STUDENTS" --model "$MODEL" --json
+        --inference "$INFERENCE" --gpus-per-student "$GPUS_PER_STUDENT" --editor "$EDITOR")
     [[ -n "$GPU_NODE_TYPE" ]] && SIZING_ARGS+=(--gpu-node-type "$GPU_NODE_TYPE")
     [[ -n "$TP" ]]            && SIZING_ARGS+=(--tp "$TP")
     [[ -n "$CPU_NODE_TYPE" ]] && SIZING_ARGS+=(--cpu-node-type "$CPU_NODE_TYPE")
@@ -505,6 +620,7 @@ rule
 echo ""
 if [[ $MULTI_MODEL -eq 0 ]]; then
     python3 "${SCRIPTS}/sizing.py" plan --students "$STUDENTS" --model "$MODEL" \
+        --inference "$INFERENCE" --gpus-per-student "$GPUS_PER_STUDENT" --editor "$EDITOR" \
         ${GPU_NODE_TYPE:+--gpu-node-type "$GPU_NODE_TYPE"} ${TP:+--tp "$TP"} \
         | sed 's/^/  /'
     echo ""
@@ -514,7 +630,14 @@ if [[ $MULTI_MODEL -eq 0 ]]; then
     printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
     printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
     printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
-    printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "${REPLICAS} replica(s), ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (TP=${TP})"
+    # Inference line tracks the component: shared-vllm keeps today's exact text.
+    if [[ "$INFERENCE" == "external" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "external — ${INFERENCE_ENDPOINT}"
+    elif [[ "$INFERENCE" == "dedicated-vllm" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "per-student under-tuned, ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (1 GPU each)"
+    else
+        printf "  ${DIM}%-14s${RESET} %s\n" "vLLM:"       "${REPLICAS} replica(s), ${GPU_NODE_COUNT}x ${GPU_NODE_TYPE} (TP=${TP})"
+    fi
     printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
     printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
     echo ""
@@ -532,6 +655,29 @@ else
     printf "  ${DIM}%-14s${RESET} %s\n" "Routing:"    "agentgateway → ${MODELS}"
     printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
     printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
+    echo ""
+fi
+
+# ---- Component composition (only when it differs from the default shape, so the
+#      default deploy's preview stays byte-identical to the original platform) ----
+if components_nondefault; then
+    echo ""
+    rule
+    printf '%b\n' "  ${BOLD}Components${RESET}"
+    rule
+    echo ""
+    printf "  ${DIM}%-14s${RESET} %s\n" "Editor:"     "$EDITOR"
+    if [[ "$INFERENCE" == "dedicated-vllm" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "dedicated-vllm (${GPUS_PER_STUDENT} GPU/student, under-tuned)"
+    else
+        printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "$INFERENCE"
+    fi
+    if [[ "$GPU_SHARING" != "none" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "GPU sharing:" "${GPU_SHARING} (${GPU_TIMESLICING_REPLICAS} logical GPUs/card)"
+    fi
+    printf "  ${DIM}%-14s${RESET} %s\n" "Cluster acc.:" "$CLUSTER_ACCESS"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Object store:" "$OBJECT_STORAGE"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Agent deploy:" "$AGENT_DEPLOY"
     echo ""
 fi
 
@@ -562,9 +708,18 @@ if interactive; then
                 echo ""
                 printf '%b' "  ${BOLD}Students:${RESET} "; read -r STUDENTS
                 printf '%b' "  ${BOLD}Model(s):${RESET} "; read -r MODELS
+                # Re-exec preserves the component composition (config-only flags the
+                # wizard never prompts for) so "Change sizing" doesn't silently reset it.
                 exec "$0" deploy --students "$STUDENTS" --model "$MODELS" \
                      --label "$LABEL" --domain "$DOMAIN" --region "$REGION" \
-                     ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} ;;
+                     ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} \
+                     --editor "$EDITOR" --inference "$INFERENCE" \
+                     --gpus-per-student "$GPUS_PER_STUDENT" --gpu-sharing "$GPU_SHARING" \
+                     --gpu-timeslicing-replicas "$GPU_TIMESLICING_REPLICAS" \
+                     --cluster-access "$CLUSTER_ACCESS" \
+                     --object-storage "$OBJECT_STORAGE" --agent-deploy "$AGENT_DEPLOY" \
+                     ${INFERENCE_ENDPOINT:+--inference-endpoint "$INFERENCE_ENDPOINT"} \
+                     ${INFERENCE_API_KEY:+--inference-api-key "$INFERENCE_API_KEY"} ;;
             t|T) "${SCRIPTS}/capacity-test.sh" --model "$MODEL" --region "$REGION" \
                      || warn "capacity-test unavailable (added in Phase 6)" ;;
             q|Q)
@@ -711,6 +866,22 @@ EOF
 fi
 ok "Wrote ${TFVARS_OUT}"
 
+# Component composition, written into the helm overrides so the templates/scripts
+# added in later phases can consume it. Always emitted; every value defaults to
+# today's behavior, and templates gate on "differs from default", so the default
+# render is unchanged.
+COMPONENTS_YAML="$(cat <<EOF
+editor: ${EDITOR}
+inference: ${INFERENCE}
+gpus_per_student: ${GPUS_PER_STUDENT}
+gpu_sharing: ${GPU_SHARING}
+gpu_timeslicing_replicas: ${GPU_TIMESLICING_REPLICAS}
+cluster_access: ${CLUSTER_ACCESS}
+object_storage: ${OBJECT_STORAGE}
+agent_deploy: ${AGENT_DEPLOY}
+EOF
+)"
+
 # ---- Write Helm overrides (merged over infra/helm/values.yaml) ----
 if [[ $MULTI_MODEL -eq 0 ]]; then
     # Single-model: write model-specific vllm_extra_args from the sizing plan.
@@ -732,6 +903,7 @@ max_model_len: ${MAX_MODEL_LEN}
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 content_repo: "${CONTENT_REPO}"
+${COMPONENTS_YAML}
 hf_token: ""
 vllm_extra_args:
 ${VLLM_ARGS_YAML}
@@ -773,6 +945,7 @@ workspace_image: ${WORKSPACE_IMAGE}
 vllm_host: http://agentgateway:8080/v1
 content_repo: "${CONTENT_REPO}"
 gateway_api_key: "${GATEWAY_API_KEY}"
+${COMPONENTS_YAML}
 hf_token: ""
 EOF
 fi
@@ -797,9 +970,23 @@ printf '%b\n' "  ${BOLD}Generating ${STUDENTS} student workspaces${RESET}"
 rule
 GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --namespace "$NAMESPACE" --image "$WORKSPACE_IMAGE"
-    --content-repo "$CONTENT_REPO")
+    --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
+    --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY"
+    --object-storage "$OBJECT_STORAGE")
 if [[ $MULTI_MODEL -eq 0 ]]; then
     GEN_PODS_ARGS+=(--model "$MODEL")
+    if [[ "$INFERENCE" == "external" ]]; then
+        # No platform vLLM — point every workspace at the user-supplied endpoint.
+        GEN_PODS_ARGS+=(--vllm-host "$INFERENCE_ENDPOINT")
+        [[ -n "$INFERENCE_API_KEY" ]] && GEN_PODS_ARGS+=(--api-key "$INFERENCE_API_KEY")
+    elif [[ "$CLUSTER_ACCESS" == "scoped" && "$INFERENCE" == "shared-vllm" ]]; then
+        # cluster_access=scoped relocates each workspace into its own namespace, so the
+        # same-namespace "vllm" short name no longer resolves to the shared vLLM. Point
+        # shared-vllm workspaces at the fully-qualified shared service.
+        GEN_PODS_ARGS+=(--vllm-host "http://vllm.${NAMESPACE}.svc.cluster.local:8000/v1")
+    fi
+    # dedicated-vllm puts a `vllm` Service in the student's own namespace, so the
+    # default in-namespace short name (http://vllm:8000/v1) resolves — nothing to set.
 else
     GEN_PODS_ARGS+=(--model "$MODEL" --vllm-host "http://agentgateway:8080/v1"
         --model-names "$MODELS" --api-key "$GATEWAY_API_KEY")
@@ -807,6 +994,37 @@ fi
 env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-pods.sh" "${GEN_PODS_ARGS[@]}"
 
 export KUBECONFIG="${INFRA}/kubeconfig.yaml"
+
+# cluster_access=scoped: mint per-student scoped kubeconfigs (needs the namespaces +
+# ServiceAccounts that provision.sh already applied) and replicate the wildcard TLS
+# secret into each student namespace (per-namespace Ingresses need a co-located cert).
+if [[ "$CLUSTER_ACCESS" == "scoped" ]]; then
+    env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-kubeconfig.sh" -n "$STUDENTS" --namespace "$NAMESPACE"
+    if kubectl -n "$NAMESPACE" get secret workshop-tls >/dev/null 2>&1; then
+        for i in $(seq 1 "$STUDENTS"); do
+            ns="$(printf '%s-s%02d' "$NAMESPACE" "$i")"
+            kubectl -n "$NAMESPACE" get secret workshop-tls -o yaml \
+                | sed -e "s/namespace: ${NAMESPACE}/namespace: ${ns}/" \
+                      -e '/resourceVersion:/d' -e '/uid:/d' -e '/creationTimestamp:/d' \
+                | kubectl apply -f - >/dev/null
+        done
+        echo "  ✓ replicated workshop-tls into ${STUDENTS} student namespaces"
+    else
+        echo "  ! workshop-tls not found; per-student Ingresses will fall back to the default cert"
+    fi
+fi
+
+# object_storage=managed: provision a per-student bucket + bucket-scoped key (the
+# unique run LABEL prefixes the globally-unique bucket names) and emit per-student
+# Secrets into generated/. Idempotent; teardown.sh revokes/deletes by the same prefix.
+if [[ "$OBJECT_STORAGE" == "managed" ]]; then
+    echo ""
+    printf '%b\n' "  ${BOLD}Provisioning per-student Object Storage${RESET}"
+    "${SCRIPTS}/provision-object-storage.sh" \
+        -n "$STUDENTS" --region "$REGION" --prefix "$LABEL" \
+        --namespace "$NAMESPACE" --cluster-access "$CLUSTER_ACCESS"
+fi
+
 kubectl apply -f "${GEN_DIR}/"
 
 # ---- Done ----

@@ -1,0 +1,36 @@
+# SA-agent workshop — each student builds a Strands agent in a notebook, gives it
+# durable memory in a per-student Object Storage bucket, and (capstone) deploys it
+# into their own namespace.
+#
+#   export TF_VAR_token=...
+#   make deploy ARGS="--yes --config examples/sa-agent.yaml"
+#   # or:  ./deploy.sh deploy --yes --config examples/sa-agent.yaml
+#
+# Anything omitted is filled by the wizard's autopilot. Flags override these.
+# This uses the SHARED vLLM (cheap, ~16 students/replica) — to call OpenAI/Anthropic
+# instead, set `inference: external` + `inference_endpoint` (and drop the model/GPU).
+
+students:     20
+model:        Qwen/Qwen3-8B-FP8     # the shared inference endpoint for every student's agent
+content_repo: ""                     # point at the sa-agent lessons repo
+domain:       ""                     # "" → sslip.io + self-signed TLS
+region:       us-ord
+
+# --- Components (config-only; the wizard never prompts for these) ---
+editor:          jupyter            # students build the agent in a notebook
+inference:       shared-vllm        # cheap shared endpoint; or: external (+ inference_endpoint)
+cluster_access:  scoped             # module 7 deploys the agent into the student's own namespace
+agent_deploy:    plain              # capstone: kubectl apply the agent (Deployment+Service)
+object_storage:  managed            # per-student bucket + bucket-scoped key for durable memory
+gpus_per_student: 1
+
+# Object Storage note: `managed` provisions ONE bucket per student (keys scope to
+# buckets, not prefixes). At large headcounts raise the account bucket-count limit via
+# a support ticket ahead of time. Teardown empties+deletes the buckets and revokes the
+# keys by the run label. Students paste their OWN read-only Linode token at runtime for
+# any account-read modules — the operator token is NEVER injected into a workspace.
+
+# To call a hosted model instead of the shared vLLM, swap the two lines above for:
+#   inference:          external
+#   inference_endpoint: https://api.openai.com/v1
+#   inference_api_key:  ""          # set if the endpoint requires a bearer key

@@ -1,0 +1,11 @@
+# kind cluster for offline NetworkPolicy + RBAC enforcement tests (Phase 0+).
+# Cilium replaces the default CNI and kube-proxy, matching LKE's Cilium dataplane
+# so NetworkPolicy enforcement is real (an unenforced policy is silently decorative).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: awp
+networking:
+  disableDefaultCNI: true   # Cilium provides the CNI
+  kubeProxyMode: none       # Cilium replaces kube-proxy
+nodes:
+  - role: control-plane

@@ -38,15 +38,19 @@ resource "linode_lke_cluster" "workshop" {
 
 locals {
   # Single-model: one pool from flat vars. Multi-model: use gpu_pools list.
+  # inference=external sets gpu_node_count=0 → no GPU pool (the workshop calls a
+  # user-supplied endpoint). dedicated-vllm sets gpu_node_count=students (one
+  # single-GPU node per student). LKE pools require count>=1, so a 0 count drops
+  # the pool entirely rather than passing an invalid node_count.
   effective_gpu_pools = var.multi_model ? {
     for p in var.gpu_pools : p.label => p
-    } : {
-    "gpu" = {
-      type  = var.gpu_node_type
-      count = var.gpu_node_count
-      label = "gpu"
-    }
-  }
+    } : (var.gpu_node_count > 0 ? {
+      "gpu" = {
+        type  = var.gpu_node_type
+        count = var.gpu_node_count
+        label = "gpu"
+      }
+  } : {})
 }
 
 resource "linode_lke_node_pool" "gpu" {

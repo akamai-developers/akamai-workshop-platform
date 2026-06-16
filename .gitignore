@@ -230,3 +230,12 @@ infra/terraform/.terraform/
 infra/terraform/.terraform.lock.hcl
 infra/kubeconfig.yaml
 infra/.certs/
+
+# Autonomous build scaffolding (not part of the feature)
+CLAUDE.md
+build.sh
+PROMPT.md
+BUILD_PROGRESS.md
+build-logs/
+.build/
+infra/terraform/terraform.tfstate.*.backup

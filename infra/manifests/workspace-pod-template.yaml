@@ -25,7 +25,9 @@ spec:
       ports:
         - containerPort: 8080
           name: http
+__OBJECT_STORAGE_ENVFROM__
       env:
+__WORKSPACE_TYPE_ENV__
         - name: PASSWORD
           valueFrom:
             secretKeyRef:
@@ -61,10 +63,12 @@ spec:
         - name: startup
           mountPath: /workshop-scripts
           readOnly: true
+__KUBECONFIG_MOUNT__
   volumes:
     - name: startup
       configMap:
         name: workspace-startup
+__KUBECONFIG_VOLUME__
   restartPolicy: Always
 ---
 apiVersion: v1

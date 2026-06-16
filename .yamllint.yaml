@@ -1,0 +1,23 @@
+# yamllint config for akamai-workshop-platform.
+# Relaxed to match the repo's long-standing YAML style (long comment lines, no
+# leading `---`). Helm templates under infra/helm/templates/ are NOT pure YAML
+# (Go template syntax) and are excluded — lint their rendered output instead.
+extends: default
+
+yaml-files:
+  - "*.yaml"
+  - "*.yml"
+
+ignore: |
+  infra/helm/templates/
+  .venv/
+
+rules:
+  line-length: disable
+  document-start: disable
+  colons: disable
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  truthy:
+    check-keys: false
