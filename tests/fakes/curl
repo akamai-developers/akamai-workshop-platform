@@ -12,4 +12,15 @@ if [[ -n "${FAKE_CURL_FAIL:-}" ]]; then
   exit "${FAKE_CURL_FAIL}"
 fi
 
-printf '%s' "${FAKE_CURL_OUT:-}"
+# Object Storage bucket REST API (provision-object-storage.sh):
+#   create_bucket   → `curl -w %{http_code}` expects an HTTP status back
+#   list_buckets    → GET .../buckets?... expects the buckets JSON
+#   delete_bucket   → DELETE, output discarded
+args="$*"
+if [[ "$args" == *"%{http_code}"* ]]; then
+  printf '%s' "${FAKE_CURL_HTTP_CODE:-200}"
+elif [[ "$args" == *"object-storage/buckets?"* ]]; then
+  printf '%s' "${FAKE_OBJ_BUCKETS:-[]}"
+else
+  printf '%s' "${FAKE_CURL_OUT:-}"
+fi

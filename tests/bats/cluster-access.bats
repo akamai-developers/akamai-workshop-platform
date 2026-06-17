@@ -112,3 +112,19 @@ setup() {
   grep -q 'token: faketoken.workshop-s01' "$f"
   [[ "$(cat "$f")" != *"client-certificate"* ]]
 }
+
+# --- shared-vllm + scoped cross-namespace reachability (Phase 8 fix) -----------
+
+@test "scoped: shared vLLM policy admits workspaces from per-student namespaces" {
+  run helm template "${HELM_DIR}" --set cluster_access=scoped --set student_count=1
+  [ "$status" -eq 0 ]
+  # allow-workspaces-to-vllm must accept ingress from awp-student=true namespaces,
+  # else shared-vllm + scoped workspaces (the SA preset) can't reach the model.
+  echo "$output" | awk '/name: allow-workspaces-to-vllm/,/port: 8000/' | grep -q 'awp-student: "true"'
+}
+
+@test "default (cluster_access=none) vLLM policy has NO cross-namespace selector" {
+  run helm template "${HELM_DIR}"
+  [ "$status" -eq 0 ]
+  ! { echo "$output" | awk '/name: allow-workspaces-to-vllm/,/port: 8000/' | grep -q 'awp-student'; }
+}

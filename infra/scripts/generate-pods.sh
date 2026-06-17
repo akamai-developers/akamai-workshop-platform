@@ -41,6 +41,10 @@ NAMESPACE="${NAMESPACE:-workshop}"
 WORKSPACE_IMAGE="${WORKSPACE_IMAGE:-ghcr.io/akamai-developers/ai-agents-workspace:latest}"
 MODEL="${MODEL:-Qwen/Qwen3-8B-FP8}"
 MODEL_NAMES=""
+# Optional embedding model id (multi-model gateway). When set, each workspace gets
+# EMBEDDING_BASE_URL (= VLLM_HOST, the gateway) + EMBEDDING_MODEL_ID for RAG. Default
+# empty → no embedding env (byte-identical to today).
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-}"
 VLLM_HOST="${VLLM_HOST:-http://vllm:8000/v1}"
 CONTENT_REPO="${CONTENT_REPO:-}"
 # Key students' OpenAI client sends as `Authorization: Bearer`. "not-needed" is the
@@ -72,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --image) WORKSPACE_IMAGE="$2"; shift 2 ;;
         --model) MODEL="$2"; shift 2 ;;
         --model-names) MODEL_NAMES="$2"; shift 2 ;;
+        --embedding-model) EMBEDDING_MODEL="$2"; shift 2 ;;
         --vllm-host) VLLM_HOST="$2"; shift 2 ;;
         --content-repo) CONTENT_REPO="$2"; shift 2 ;;
         --api-key) VLLM_API_KEY="$2"; shift 2 ;;
@@ -91,6 +96,7 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --image           Workspace container image (default: stock prebuilt image)
   --model           MODEL_NAME env stamped into each workspace (default: Qwen/Qwen3-8B-FP8)
   --model-names     MODEL_NAMES env (comma-separated, multi-model; defaults to --model)
+  --embedding-model EMBEDDING_MODEL_ID env (multi-model gateway; "" → no embedding env)
   --vllm-host       VLLM_HOST env stamped into each workspace (default: http://vllm:8000/v1)
   --content-repo    CONTENT_REPO env (git repo cloned at pod startup; "" → default)
   --api-key         VLLM_API_KEY env (sent as Bearer to the gateway; "not-needed" if no auth)
@@ -357,7 +363,8 @@ EOF
         -e "s|__VLLM_API_KEY__|${VLLM_API_KEY}|g" \
         "${TEMPLATE}" \
       | awk -v wt="${WORKSPACE_TYPE}" -v ca="${CLUSTER_ACCESS}" -v kc="${KCFG_SECRET}" \
-            -v os="${OBJECT_STORAGE}" -v osname="ws-${PADDED}-object-storage" '
+            -v os="${OBJECT_STORAGE}" -v osname="ws-${PADDED}-object-storage" \
+            -v vh="${VLLM_HOST}" -v md="${MODEL}" -v em="${EMBEDDING_MODEL}" '
           /__OBJECT_STORAGE_ENVFROM__/ {
             # Default (object_storage=none): drop the sentinel (byte-identical output).
             # managed: pull the per-student object-storage Secret in as envFrom (optional
@@ -376,6 +383,30 @@ EOF
             if (wt != "code-server") {
               print "        - name: WORKSPACE_TYPE"
               print "          value: \"" wt "\""
+            }
+            next
+          }
+          /__EDITOR_ENV_ALIASES__/ {
+            # Some workshops (e.g. the Solution Architect Agent) read the OpenAI-client
+            # names VLLM_BASE_URL / VLLM_MODEL_ID rather than VLLM_HOST / MODEL_NAME. Emit
+            # those aliases for any non-default editor; the default code-server path drops
+            # them, so the default workspace manifest stays byte-identical.
+            if (wt != "code-server") {
+              print "        - name: VLLM_BASE_URL"
+              print "          value: \"" vh "\""
+              print "        - name: VLLM_MODEL_ID"
+              print "          value: \"" md "\""
+            }
+            next
+          }
+          /__EMBEDDING_ENV__/ {
+            # An embedding model rides the multi-model gateway; it is reachable at the same
+            # VLLM_HOST by its own model id. Default (no embedding model) drops these.
+            if (em != "") {
+              print "        - name: EMBEDDING_BASE_URL"
+              print "          value: \"" vh "\""
+              print "        - name: EMBEDDING_MODEL_ID"
+              print "          value: \"" em "\""
             }
             next
           }
@@ -527,6 +558,25 @@ EOF
               value: "${CONTENT_REPO}"
             - name: VLLM_API_KEY
               value: "${VLLM_API_KEY}"
+            # OpenAI-client names the agent's settings.py reads (provider default is
+            # 'openai', so MODEL_PROVIDER must be set for it to use the platform vLLM).
+            - name: MODEL_PROVIDER
+              value: "vllm"
+            - name: VLLM_BASE_URL
+              value: "${VLLM_HOST}"
+            - name: VLLM_MODEL_ID
+              value: "${MODEL}"
+EOF
+            # An embedding model (multi-model gateway) is reachable at the same gateway URL.
+            if [[ -n "${EMBEDDING_MODEL}" ]]; then
+                cat >> "${MANIFESTS_TMP}" << EOF
+            - name: EMBEDDING_BASE_URL
+              value: "${VLLM_HOST}"
+            - name: EMBEDDING_MODEL_ID
+              value: "${EMBEDDING_MODEL}"
+EOF
+            fi
+            cat >> "${MANIFESTS_TMP}" << EOF
           resources:
             requests:
               cpu: "250m"

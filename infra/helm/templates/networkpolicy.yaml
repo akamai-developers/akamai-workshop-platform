@@ -50,6 +50,17 @@ spec:
         - podSelector:
             matchLabels:
               app: capacity-test
+{{- if eq .Values.cluster_access "scoped" }}
+        # cluster_access=scoped relocates each workspace into its own namespace
+        # (labelled awp-student=true). Allow those workspaces to reach the shared vLLM
+        # across namespaces — without this, shared-vllm + scoped workspaces are blocked.
+        - namespaceSelector:
+            matchLabels:
+              awp-student: "true"
+          podSelector:
+            matchLabels:
+              app: workspace
+{{- end }}
       ports:
         - protocol: TCP
           port: 8000
@@ -74,6 +85,15 @@ spec:
         - podSelector:
             matchLabels:
               app: capacity-test
+{{- if eq .Values.cluster_access "scoped" }}
+        # scoped: workspaces live in per-student namespaces (awp-student=true).
+        - namespaceSelector:
+            matchLabels:
+              awp-student: "true"
+          podSelector:
+            matchLabels:
+              app: workspace
+{{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.agentgateway_port }}

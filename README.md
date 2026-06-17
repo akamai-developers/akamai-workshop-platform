@@ -1,8 +1,8 @@
 # akamai-workshop-platform
 
-`akamai-workshop-platform` provisions a per-student GPU workshop classroom on [Akamai Cloud](https://www.linode.com/) (Linode LKE) with one interactive wizard, then tears it down with one command. The platform provides the core infrastructure: per-student browser IDEs ([code-server](https://github.com/coder/code-server)), GPU [vLLM](https://github.com/vllm-project/vllm) inference, student URLs and passwords, TLS, and Kubernetes networking. You point it at any content repo, answer about six questions, confirm a cost preview, and get a running classroom plus a CSV of student URLs and passwords.
+`akamai-workshop-platform` provisions a per-student GPU workshop classroom on [Akamai Cloud](https://www.linode.com/) (Linode LKE) with one interactive wizard, then tears it down with one command. The platform provides the core infrastructure: per-student browser IDEs ([code-server](https://github.com/coder/code-server) or JupyterLab), GPU [vLLM](https://github.com/vllm-project/vllm) inference, student URLs and passwords, TLS, and Kubernetes networking. You pick a workshop (or point it at any content repo), answer about seven questions, confirm a cost preview, and get a running classroom plus a CSV of student URLs and passwords.
 
-The [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop) is the default content, not the product. Any content repo works.
+The wizard offers ready-made workshops as presets — the interactive default is the [Solution Architect Agent](https://github.com/akamai-developers/akamai-workshop-solution-architect-agent) (JupyterLab); the [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop) is another. The platform is content-agnostic — any content repo works.
 
 ## Prerequisites
 
@@ -27,7 +27,8 @@ You do not need a HuggingFace token, because the model menu is ungated only. You
 
 ## What it does
 
-- **Self-service:** an interactive wizard collects the deployment name, student count, model, content repo, domain, and region.
+- **Self-service:** an interactive wizard collects the deployment name, student count, workshop preset, model, content repo, domain, and region.
+- **Workshop presets:** the wizard's "Workshop" step bundles a content repo + editor + model + component composition into one pick. The default is the **Solution Architect Agent** (JupyterLab, `Qwen/Qwen2.5-7B-Instruct`); other presets are `ai-agents` (the original code-server workshop) and `own-inference`. Pick non-interactively with `--preset <name>`.
 - **Autopilot sizing:** the wizard picks the GPU plan, tensor-parallel size, and replica and node counts from the student count and model, then shows a `$/hr` and class-cost preview before anything bills.
 - **Content-agnostic:** the platform clones your `content_repo` into each workspace at pod startup, with no image rebuild and no registry login. See [`examples/README.md`](examples/README.md).
 - **Domain-optional:** with no domain, the platform uses `sslip.io` hostnames and self-signed TLS (the default). With a domain, it uses Linode DNS and a Let's Encrypt wildcard certificate.
@@ -44,8 +45,8 @@ export TF_VAR_token="your-linode-api-token"
 # See the plan and cost first. This creates nothing:
 ./deploy.sh --dry-run --students 80 --model Qwen/Qwen3-8B-FP8
 
-# Interactive: asks for students, model, content repo, domain, and region,
-# shows a cost preview, provisions the classroom, then writes access-cards.csv:
+# Interactive: asks for name, class size, workshop, model, content repo, domain,
+# and region, shows a cost preview, provisions the classroom, writes access-cards.csv:
 make deploy            # or: ./deploy.sh
 
 # Tear it down when class ends. This stops billing:
@@ -78,16 +79,19 @@ Run `make help` to list every front-door target.
 
 ## Inputs
 
-These six inputs are the entire user surface. Anything you omit is filled by the wizard's autopilot.
+These inputs are the entire user surface. Anything you omit is filled by the wizard's autopilot (and a `preset` fills the editor/model/content/components for you).
 
 | Input | Default | Meaning |
 |---|---|---|
 | `name` (config key: `label`) | `ai-agents-workshop` | Deployment name; becomes the Linode cluster label. CLI: `--name`/`--label`; in `config.yaml` the key is `label` (a `name:` line is ignored) |
 | `students` | `80` | Number of student workspaces to create |
-| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id, or comma-separated ids for multi-model (e.g. `"Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"`). Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
+| `preset` (`--preset`/`--workshop`) | `solution-architect-agent` (interactive) | A named workshop = content + editor + model + components in one pick. Presets: `solution-architect-agent`, `ai-agents`, `own-inference`, `custom`. Only fills values you leave unset, so explicit keys still win. The non-interactive (`--yes`) default applies **no** preset, keeping the original platform shape. |
+| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id, or comma-separated ids for multi-model (e.g. `"Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"`). The Solution Architect Agent preset uses `Qwen/Qwen2.5-7B-Instruct`. Add `BAAI/bge-large-en-v1.5` for 1024-dim RAG embeddings. Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
 | `content_repo` | `""` | Git repo cloned into each workspace at startup. Blank uses `akamai-developers/ai-agents-workshop`. Also accepts a full git URL, `owner/repo`, or a bare repo name. |
 | `domain` | `""` (no domain) | Empty uses `sslip.io` and self-signed TLS. A value uses Linode DNS and Let's Encrypt. |
 | `region` | nearest GPU region | Chosen from the live list of GPU-capable Akamai regions |
+
+Workspaces are wired with the inference endpoint under **both** naming conventions — `VLLM_HOST`/`MODEL_NAME` (the platform's) and `VLLM_BASE_URL`/`VLLM_MODEL_ID` (what the Solution Architect Agent notebooks read) — so content that uses either set connects with no student configuration. When an embedding model is deployed, `EMBEDDING_BASE_URL`/`EMBEDDING_MODEL_ID` are injected too.
 
 ## TLS and domains
 
@@ -141,12 +145,13 @@ kubectl -n workshop get agentgatewaybackends   # from the cluster
 
 ## Component model
 
-The six inputs above provision the **default** workshop shape: a browser code-server
-per student plus one shared vLLM endpoint. Different workshops are composed from a
-catalog of independent, per-student **components** — selected once per classroom in the
-config file (the interactive wizard never prompts for them). Every component defaults to
-today's behavior, so a deploy that sets none of them is byte-identical to the original
-platform.
+With no preset, the inputs above provision the **default** workshop shape: a browser
+code-server per student plus one shared vLLM endpoint. Other workshops are composed from
+a catalog of independent, per-student **components**. The wizard's **Workshop** step
+picks a ready-made composition (a `preset`, e.g. the Solution Architect Agent); to set
+components individually, use the config file or flags. Every component defaults to today's
+behavior, so a deploy that applies no preset and sets none of them is byte-identical to
+the original platform.
 
 | Component | Values (default first) | Controls |
 |---|---|---|
@@ -174,11 +179,14 @@ Two ready-made compositions ship in [`examples/`](examples/):
 
 ```bash
 # Own-your-inference: jupyter + a dedicated, under-tuned vLLM per student to tune via kubectl
-make deploy ARGS="--config examples/own-inference.yaml"
+make deploy ARGS="--config examples/own-inference.yaml"   # or: --preset own-inference
 
 # SA-agent: jupyter + scoped kubectl + a managed per-student bucket + ship-the-agent capstone
-make deploy ARGS="--config examples/sa-agent.yaml"
+make deploy ARGS="--config examples/sa-agent.yaml"        # or: --preset solution-architect-agent
 ```
+
+These two are the same compositions the wizard's **Workshop** step offers as presets;
+the SA-agent is the interactive default.
 
 Verify without provisioning anything:
 

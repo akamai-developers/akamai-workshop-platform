@@ -44,11 +44,18 @@ _GLM_ARGS = ["--enable-auto-tool-choice", "--tool-call-parser=glm47"]
 # (Hermes2ProToolParser ... unexpected keyword 'token_ids'). vLLM ships a dedicated
 # "openai" tool-call parser for gpt-oss. See docs.vllm.ai GPT-OSS recipe.
 _GPTOSS_ARGS = ["--enable-auto-tool-choice", "--tool-call-parser=openai"]
+# Embedding (pooling) models serve /v1/embeddings, NOT chat — they take NO tool-call
+# flags (those crash an encoder model). --task embed makes vLLM load it in embed mode.
+_EMBED_ARGS = ["--task", "embed"]
 
 MODEL_CATALOG = {
     "Qwen/Qwen3-4B-Instruct-2507":                   {"vram_gb": 12, "tier": "small",
         "num_layers": 36, "num_kv_heads": 4, "head_dim": 128, "kv_dtype_bytes": 2,
         "vllm_args": _TOOL_CALL_ARGS},
+    "Qwen/Qwen2.5-7B-Instruct":                      {"vram_gb": 16, "tier": "small",
+        "num_layers": 28, "num_kv_heads": 4, "head_dim": 128, "kv_dtype_bytes": 2,
+        "vllm_args": _TOOL_CALL_ARGS,
+        "note": "the Solution Architect Agent workshop model (Apache-2.0)"},
     "openai/gpt-oss-20b":                            {"vram_gb": 16, "tier": "small",
         "num_layers": 36, "num_kv_heads": 4, "head_dim": 128, "kv_dtype_bytes": 2,
         "vllm_args": _GPTOSS_ARGS},
@@ -107,6 +114,12 @@ MODEL_CATALOG = {
         "num_layers": 40, "num_kv_heads": 4, "head_dim": 128, "kv_dtype_bytes": 2,
         "vllm_args": _GLM_ARGS,
         "note": "#1 function-calling model, MoE 31B/3B active, MIT license"},
+    # --- Embedding models (pooling; serve /v1/embeddings, pair with a chat model) ---
+    # arch params are the encoder's (BERT-large), used only for display; KV cache is 0.
+    "BAAI/bge-large-en-v1.5":                             {"vram_gb": 2, "tier": "embedding",
+        "num_layers": 24, "num_kv_heads": 16, "head_dim": 64, "kv_dtype_bytes": 2,
+        "embedding": True, "dim": 1024, "vllm_args": _EMBED_ARGS,
+        "note": "1024-dim text embeddings for RAG / pgvector; pair with a chat model"},
 }
 
 DEFAULT_MODEL = "Qwen/Qwen3-8B-FP8"
@@ -147,6 +160,10 @@ def slugify(name):
 def kv_cache_gb(model, students, context_len=KV_SIZING_CONTEXT_LEN):
     """Estimate KV cache memory in GB for a model given student concurrency."""
     m = MODEL_CATALOG[model]
+    # Embedding (encoder/pooling) models do no autoregressive decoding, so there is
+    # no per-token KV cache to size — they run on weights + framework overhead only.
+    if m.get("embedding"):
+        return 0.0
     kv_per_token = 2 * m["num_kv_heads"] * m["head_dim"] * m["kv_dtype_bytes"]
     kv_per_token_all_layers = kv_per_token * m["num_layers"]
     concurrent = max(math.ceil(students * CONCURRENCY_RATIO), MIN_ACTIVE_SLOTS)
@@ -196,6 +213,17 @@ def _pick_dedicated_plan(model, gpus_per_student):
     )
 
 
+def _pick_embedding_plan(model):
+    """Smallest single-GPU plan that fits an embedding model's weights. Embedding
+    models are tiny and high-throughput, so one replica on the cheapest GPU node
+    serves a whole class — no per-student scaling like the chat models get."""
+    needed = MODEL_CATALOG[model]["vram_gb"] + FRAMEWORK_OVERHEAD_GB
+    for plan in GPU_PLANS:
+        if plan["gpus"] == 1 and plan["vram_gb"] * 0.9 >= needed:
+            return plan
+    return GPU_PLANS[0]
+
+
 def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
          tensor_parallel_size=None, cpu_node_type=None,
          inference="shared-vllm", gpus_per_student=1, editor="code-server"):
@@ -218,6 +246,7 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
 
     model_vram = MODEL_CATALOG[model]["vram_gb"]
     kv_gb = round(kv_cache_gb(model, students), 2)
+    is_embedding = MODEL_CATALOG[model].get("embedding", False)
 
     cpu = CPU_BY_ID(cpu_node_type) if cpu_node_type else CPU_PLAN
     cpu_node_count = max(1, math.ceil(students / STUDENTS_PER_NODE))
@@ -232,6 +261,7 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
             "model_vram_gb": model_vram, "kv_cache_gb": kv_gb,
             "total_vram_gb": round(model_vram + kv_gb + FRAMEWORK_OVERHEAD_GB, 1),
             "inference": inference, "editor": editor, "gpus_per_student": 0,
+            "embedding": is_embedding,
             "gpu_node_type": "none", "gpu_node_count": 0, "gpu_vram_pool_gb": 0,
             "tensor_parallel_size": 0, "replicas": 0,
             "cpu_node_type": cpu["id"], "cpu_node_count": cpu_node_count,
@@ -257,13 +287,15 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
         # One GPU node per student (each has gpus_per_student GPUs).
         gpu_node_count = students
         replicas = students
-    else:  # shared-vllm (today) — unchanged
+    else:  # shared-vllm (today) — unchanged for chat models
         if gpu_node_type:
             if gpu_node_type not in GPU_BY_ID:
                 raise ValueError(
                     f"unknown gpu_node_type '{gpu_node_type}'. Known: "
                     + ", ".join(GPU_BY_ID))
             plan = GPU_BY_ID[gpu_node_type]
+        elif is_embedding:
+            plan = _pick_embedding_plan(model)
         else:
             plan = _pick_gpu_plan(students, model)
         tp = tensor_parallel_size if tensor_parallel_size else plan["gpus"]
@@ -271,8 +303,13 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
             raise ValueError(
                 f"tensor_parallel_size={tp} must equal the GPU count of "
                 f"{plan['id']} ({plan['gpus']})")
-        replicas = max(1, math.ceil(students / STUDENTS_PER_NODE))
-        gpu_node_count = replicas
+        if is_embedding:
+            # One lightweight replica serves the whole class — no students/16 scaling.
+            replicas = 1
+            gpu_node_count = 1
+        else:
+            replicas = max(1, math.ceil(students / STUDENTS_PER_NODE))
+            gpu_node_count = replicas
 
     gpu_cost = gpu_node_count * plan["hourly"]
     hourly = round(gpu_cost + cpu_cost, 2)
@@ -286,6 +323,7 @@ def size(students, model=DEFAULT_MODEL, gpu_node_type=None,
         "total_vram_gb": round(model_vram + kv_gb + FRAMEWORK_OVERHEAD_GB, 1),
         "inference": inference,
         "editor": editor,
+        "embedding": is_embedding,
         "gpus_per_student": gpus_per_student if inference == "dedicated-vllm" else 0,
         "gpu_node_type": plan["id"],
         "gpu_node_count": gpu_node_count,
@@ -337,6 +375,12 @@ def format_plan(p):
         gpu_line = (
             f"{p['students']} students  →  {p['gpu_node_count']}× {p['gpu_node_type']} "
             f"({p['gpus_per_student']} GPU/student, dedicated under-tuned vLLM){g}\n"
+        )
+    elif p.get("embedding"):
+        gpu_line = (
+            f"{p['students']} students  →  1 shared embedding replica  ·  "
+            f"{p['gpu_node_count']}× {p['gpu_node_type']} "
+            f"(TP={p['tensor_parallel_size']}, {p['gpu_vram_pool_gb']} GB pool){g}\n"
         )
     else:  # shared-vllm (today) — byte-identical to the original
         gpu_line = (
@@ -413,6 +457,24 @@ def cmd_multi_plan(args):
               f"~${result['cost_4h_usd']} for a 4-hour class")
 
 
+def cmd_models_info(args):
+    """Classify a comma-separated model list into chat vs embedding models and emit
+    shell-evalable assignments the deploy wizard consumes:
+
+        CHAT_MODELS='Qwen/Qwen2.5-7B-Instruct'
+        EMBEDDING_MODELS='BAAI/bge-large-en-v1.5'
+    """
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    chat, embed = [], []
+    for m in models:
+        if m not in MODEL_CATALOG:
+            print(f"ERROR: unknown model '{m}'. Run `sizing.py catalog`.", file=sys.stderr)
+            sys.exit(2)
+        (embed if MODEL_CATALOG[m].get("embedding") else chat).append(m)
+    print("CHAT_MODELS='%s'" % ",".join(chat))
+    print("EMBEDDING_MODELS='%s'" % ",".join(embed))
+
+
 def cmd_catalog(_args):
     print("Ungated model catalog (no HuggingFace token required):\n")
     for mid, m in MODEL_CATALOG.items():
@@ -423,8 +485,8 @@ def cmd_catalog(_args):
 
 
 def _grouped_models():
-    """Return models in display order: small, medium, large."""
-    tiers = ["small", "medium", "large"]
+    """Return models in display order: small, medium, large, embedding."""
+    tiers = ["small", "medium", "large", "embedding"]
     grouped = {t: [] for t in tiers}
     for mid, m in MODEL_CATALOG.items():
         grouped[m["tier"]].append((mid, m))
@@ -451,11 +513,12 @@ def cmd_wizard_table(_args):
     else:
         B = D = R = GR = YE = RE = CY = ""
 
-    tier_colors = {"small": GR, "medium": YE, "large": RE}
-    tier_gpus = {"small": "1-2 GPUs", "medium": "2-4 GPUs", "large": "4+ GPUs"}
+    tier_colors = {"small": GR, "medium": YE, "large": RE, "embedding": CY}
+    tier_gpus = {"small": "1-2 GPUs", "medium": "2-4 GPUs", "large": "4+ GPUs",
+                 "embedding": "1 GPU · RAG"}
 
     # Group by tier, preserving catalog order within each tier
-    tiers_order = ["small", "medium", "large"]
+    tiers_order = ["small", "medium", "large", "embedding"]
     grouped = {t: [] for t in tiers_order}
     for mid, m in MODEL_CATALOG.items():
         grouped[m["tier"]].append((mid, m))
@@ -568,6 +631,24 @@ def cmd_selftest(_args):
           f"2 models, aggregate GPU cost ${agg_gpu}/hr")
     ok = ok and multi_ok
 
+    # Qwen2.5-7B-Instruct (the SA-agent workshop model) sizes as a normal small chat model.
+    sa = size(students=20, model="Qwen/Qwen2.5-7B-Instruct")
+    sa_ok = (sa["kv_cache_gb"] > 0 and sa["gpu_node_count"] >= 1 and not sa["embedding"])
+    print(f"  [{'ok' if sa_ok else 'FAIL'}] Qwen2.5-7B-Instruct: small chat model "
+          f"({sa['gpu_node_type']})")
+    ok = ok and sa_ok
+
+    # Embedding model: zero KV cache, ONE replica on the smallest GPU node regardless of
+    # class size, embed args (NOT the tool-call flags that crash an encoder model).
+    emb = size(students=80, model="BAAI/bge-large-en-v1.5")
+    emb_ok = (emb["embedding"] and emb["kv_cache_gb"] == 0.0
+              and emb["replicas"] == 1 and emb["gpu_node_count"] == 1
+              and emb["gpu_node_type"] == "g2-gpu-rtx4000a1-s"
+              and emb["vllm_args"] == ["--task", "embed"])
+    print(f"  [{'ok' if emb_ok else 'FAIL'}] embedding (bge-large): 1 replica on "
+          f"{emb['gpu_node_type']} for 80 students, KV={emb['kv_cache_gb']}")
+    ok = ok and emb_ok
+
     print("\nSELF-TEST", "PASSED" if ok else "FAILED")
     sys.exit(0 if ok else 1)
 
@@ -602,6 +683,11 @@ def main():
                     help="comma-separated model names")
     mp.add_argument("--json", action="store_true")
     mp.set_defaults(func=cmd_multi_plan)
+
+    mi = sub.add_parser("models-info",
+                        help="classify models into chat vs embedding (shell-evalable)")
+    mi.add_argument("--models", required=True, help="comma-separated model names")
+    mi.set_defaults(func=cmd_models_info)
 
     cat = sub.add_parser("catalog", help="list the ungated model catalog")
     cat.set_defaults(func=cmd_catalog)

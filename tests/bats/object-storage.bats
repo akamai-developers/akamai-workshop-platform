@@ -19,9 +19,9 @@ setup() {
 @test "provision mints a bucket-scoped key + Secret per student" {
   OUTPUT_DIR="${OUT}" run "${PROV}" -n 3 --region us-ord --prefix acme-2026
   [ "$status" -eq 0 ]
-  # one keys-create + one buckets-create per student
+  # one keys-create (CLI) + one bucket POST (REST API via curl) per student
   [ "$(grep -c 'object-storage keys-create' "${FAKE_LINODE_LOG}")" -eq 3 ]
-  [ "$(grep -c 'object-storage buckets-create' "${FAKE_LINODE_LOG}")" -eq 3 ]
+  [ "$(grep -c -- '-X POST .*object-storage/buckets' "${FAKE_CURL_LOG}")" -eq 3 ]
   # key is LIMITED to the single bucket (read_write) — the isolation guarantee
   assert_linode_called 'keys-create.*--bucket_access.bucket_name acme-2026-s01.*--bucket_access.permissions read_write'
   # Secret carries the SA-agent env vars
@@ -38,15 +38,15 @@ setup() {
   OUTPUT_DIR="${OUT}" run "${PROV}" -n 1 --region us-ord --prefix acme-2026
   [ "$status" -eq 0 ]
   # bucket/key creation must carry the region id from the clusters-list `region` column
-  assert_linode_called 'buckets-create --region us-ord '
-  assert_linode_called 'keys-create.*--regions us-ord'
-  ! grep -qE 'buckets-create --region us-ord-1' "${FAKE_LINODE_LOG}"
+  grep -q '"region":"us-ord"' "${FAKE_CURL_LOG}"          # bucket POST payload (REST API)
+  assert_linode_called 'keys-create.*--regions us-ord'    # key (CLI)
+  ! grep -q '"region":"us-ord-1"' "${FAKE_CURL_LOG}"
 }
 
 @test "provision resolves the region even if given the cluster id" {
   OUTPUT_DIR="${OUT}" run "${PROV}" -n 1 --region us-ord-1 --prefix acme-2026
   [ "$status" -eq 0 ]
-  assert_linode_called 'buckets-create --region us-ord '
+  grep -q '"region":"us-ord"' "${FAKE_CURL_LOG}"
 }
 
 @test "provision fails on an unknown region" {
@@ -66,10 +66,11 @@ setup() {
   OUTPUT_DIR="${OUT}" run "${PROV}" -n 2 --region us-ord --prefix acme-2026
   [ "$status" -eq 0 ]
   : > "${FAKE_LINODE_LOG}"
+  : > "${FAKE_CURL_LOG}"
   OUTPUT_DIR="${OUT}" run "${PROV}" -n 2 --region us-ord --prefix acme-2026
   [ "$status" -eq 0 ]
   [ "$(grep -c 'keys-create' "${FAKE_LINODE_LOG}")" -eq 0 ]
-  [ "$(grep -c 'buckets-create' "${FAKE_LINODE_LOG}")" -eq 0 ]
+  [ "$(grep -c -- '-X POST .*object-storage/buckets' "${FAKE_CURL_LOG}")" -eq 0 ]
   [[ "$output" == *"Preserved 2"* ]]
 }
 
@@ -84,19 +85,24 @@ setup() {
 # --- teardown -----------------------------------------------------------------
 
 @test "teardown revokes every key + empties/deletes every bucket by prefix" {
-  OUTPUT_DIR="${OUT}" "${PROV}" -n 2 --region us-ord --prefix acme-2026 >/dev/null
+  OUTPUT_DIR="${OUT}" run "${PROV}" -n 2 --region us-ord --prefix acme-2026
   : > "${FAKE_LINODE_LOG}"
+  : > "${FAKE_CURL_LOG}"
+  export FAKE_S3_LOG="${BATS_TEST_TMPDIR}/s3.log"; : > "${FAKE_S3_LOG}"
+  export S3_EMPTY="${FAKES_DIR}/s3-empty"
   export FAKE_OBJ_KEYS='[{"id":4242,"label":"acme-2026-s01-key"},{"id":4243,"label":"acme-2026-s02-key"},{"id":9,"label":"other-key"}]'
   export FAKE_OBJ_BUCKETS='[{"label":"acme-2026-s01"},{"label":"acme-2026-s02"},{"label":"someone-else-bucket"}]'
   OUTPUT_DIR="${OUT}" run "${PROV}" --teardown --region us-ord --prefix acme-2026
   [ "$status" -eq 0 ]
-  # revokes only our two keys, not the unrelated one
+  # revokes only our two keys (CLI), not the unrelated one
   assert_linode_called 'object-storage keys-delete 4242'
   assert_linode_called 'object-storage keys-delete 4243'
   ! grep -qE 'keys-delete 9$' "${FAKE_LINODE_LOG}"
-  # empties + deletes only our buckets, not the unrelated one
-  assert_linode_called 'rb --recursive s3://acme-2026-s01'
-  assert_linode_called 'object-storage buckets-delete us-ord acme-2026-s01'
+  # empties (stdlib SigV4 s3.py) + deletes (REST API, curl) only our buckets
+  grep -q -- '--bucket acme-2026-s01' "${FAKE_S3_LOG}"
+  grep -q -- '-X DELETE .*object-storage/buckets/us-ord/acme-2026-s01' "${FAKE_CURL_LOG}"
+  ! grep -q 'someone-else-bucket' "${FAKE_S3_LOG}"
+  ! grep -q 'someone-else-bucket' "${FAKE_CURL_LOG}"
   ! grep -q 'someone-else-bucket' "${FAKE_LINODE_LOG}"
   # local state removed
   [ ! -f "${OUT}/object-storage.csv" ]
@@ -106,7 +112,7 @@ setup() {
   OUTPUT_DIR="${OUT}" run "${PROV}" --teardown --region us-ord --prefix acme-2026
   [ "$status" -eq 0 ]
   [ "$(grep -c 'keys-delete' "${FAKE_LINODE_LOG}")" -eq 0 ]
-  [ "$(grep -c 'buckets-delete' "${FAKE_LINODE_LOG}")" -eq 0 ]
+  [ "$(grep -c -- '-X DELETE .*object-storage/buckets' "${FAKE_CURL_LOG}")" -eq 0 ]
 }
 
 # --- generate-pods envFrom wiring ---------------------------------------------

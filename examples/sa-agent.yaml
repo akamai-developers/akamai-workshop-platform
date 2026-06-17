@@ -1,28 +1,40 @@
-# SA-agent workshop — each student builds a Strands agent in a notebook, gives it
-# durable memory in a per-student Object Storage bucket, and (capstone) deploys it
-# into their own namespace.
+# Solution Architect Agent workshop — each student builds an Akamai Cloud Solutions
+# Architect agent in JupyterLab (reads a Linode account, prices resources, draws its own
+# architecture, answers from the docs), gives it durable memory in a per-student Object
+# Storage bucket, and (capstone) deploys it into their own namespace.
 #
+# This is the wizard's DEFAULT workshop — `./deploy.sh` and pick option 1, or:
 #   export TF_VAR_token=...
+#   make deploy ARGS="--yes --preset solution-architect-agent --students 20"
+#   # or with this file:
 #   make deploy ARGS="--yes --config examples/sa-agent.yaml"
-#   # or:  ./deploy.sh deploy --yes --config examples/sa-agent.yaml
 #
 # Anything omitted is filled by the wizard's autopilot. Flags override these.
 # This uses the SHARED vLLM (cheap, ~16 students/replica) — to call OpenAI/Anthropic
 # instead, set `inference: external` + `inference_endpoint` (and drop the model/GPU).
 
 students:     20
-model:        Qwen/Qwen3-8B-FP8     # the shared inference endpoint for every student's agent
-content_repo: ""                     # point at the sa-agent lessons repo
-domain:       ""                     # "" → sslip.io + self-signed TLS
+model:        Qwen/Qwen2.5-7B-Instruct   # the model the SA-agent notebooks are wired for
+content_repo: https://github.com/akamai-developers/akamai-workshop-solution-architect-agent
+domain:       ""                          # "" → sslip.io + self-signed TLS
 region:       us-ord
 
-# --- Components (config-only; the wizard never prompts for these) ---
+# --- Components (config-only; or use `preset: solution-architect-agent`) ---
 editor:          jupyter            # students build the agent in a notebook
 inference:       shared-vllm        # cheap shared endpoint; or: external (+ inference_endpoint)
-cluster_access:  scoped             # module 7 deploys the agent into the student's own namespace
+cluster_access:  scoped             # module 8 deploys the agent into the student's own namespace
 agent_deploy:    plain              # capstone: kubectl apply the agent (Deployment+Service)
 object_storage:  managed            # per-student bucket + bucket-scoped key for durable memory
 gpus_per_student: 1
+
+# The platform wires the endpoint into every workspace under BOTH naming conventions:
+# VLLM_HOST/MODEL_NAME (platform) and VLLM_BASE_URL/VLLM_MODEL_ID (what these notebooks
+# read), so "the model is already wired in" — students configure nothing.
+
+# Optional: add an embedding model for the docs-RAG / pgvector extension (module 7).
+# It rides the multi-model gateway and is injected as EMBEDDING_BASE_URL / EMBEDDING_MODEL_ID.
+# Costs ~one small GPU node (~$0.52/hr). Uncomment to enable:
+#   models: "Qwen/Qwen2.5-7B-Instruct,BAAI/bge-large-en-v1.5"
 
 # Object Storage note: `managed` provisions ONE bucket per student (keys scope to
 # buckets, not prefixes). At large headcounts raise the account bucket-count limit via

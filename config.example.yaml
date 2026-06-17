@@ -3,16 +3,25 @@
 # The Linode token is NOT here — export it instead:  export TF_VAR_token=...
 # Anything you omit is filled by the wizard's autopilot. Flags override these.
 
-# --- The 6 wizard questions (name, students, model, content, domain, region) ---
+# --- The wizard questions (name, students, workshop, model, content, domain, region) ---
 # label sets the deployment name (the wizard's first prompt); the rest map 1:1.
 students:     80
+
+# preset: a named workshop = content + editor + model + components in one pick. It is
+# the wizard's "Workshop" step (default: solution-architect-agent). A preset only FILLS
+# values you leave unset, so any explicit key below still wins. Leave blank for the
+# original platform shape. Presets: solution-architect-agent | ai-agents | own-inference.
+# preset:     solution-architect-agent
+
 model:        Qwen/Qwen3-8B-FP8     # ungated only; see `infra/scripts/sizing.py catalog`
 # models:     "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"  # multi-model: comma-separated, deploys agentgateway
+# Add an embedding model (rides the gateway, served as EMBEDDING_BASE_URL/EMBEDDING_MODEL_ID):
+# models:     "Qwen/Qwen2.5-7B-Instruct,BAAI/bge-large-en-v1.5"   # 1024-dim RAG embeddings
 content_repo: ""                     # "" → default github.com/akamai-developers/ai-agents-workshop
 domain:       ""                     # "" → sslip.io + self-signed TLS; else Linode DNS + Let's Encrypt
 region:       us-ord                 # "" → wizard lists live GPU regions (see `infra/scripts/regions.sh list`)
 
-# --- Component catalog (PLAN.md) — config-only; the wizard never prompts for these ---
+# --- Component catalog (PLAN.md) — set directly, or bundled by `preset:` above ---
 # A workshop is a composition of per-student components. EVERY default below is
 # today's behavior, so omitting all of them deploys exactly the original platform.
 # See examples/ for ready-made workshop compositions.

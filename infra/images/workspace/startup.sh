@@ -224,13 +224,23 @@ fi
 if [ "${WORKSPACE_TYPE}" = "jupyter" ] && ! command -v jupyter >/dev/null 2>&1; then
   if [ -x "${WORKSPACE_DIR}/.venv/bin/jupyter" ]; then
     export PATH="${WORKSPACE_DIR}/.venv/bin:${PATH}"
-  elif command -v uv >/dev/null 2>&1 && [ -d "${WORKSPACE_DIR}/.venv" ]; then
-    log "jupyter not found; installing jupyterlab into .venv (best-effort)"
+  elif command -v uv >/dev/null 2>&1; then
+    # The content repo may ship NO requirements.txt (so step 3 created no .venv) — the
+    # SA-agent workshop installs its deps per-notebook. Create a .venv now so jupyterlab
+    # has somewhere to land; without this `exec jupyter` fails with 127 and the pod
+    # crash-loops. The dedicated jupyter workspace image (jupyterlab baked) avoids this.
+    if [ ! -d "${WORKSPACE_DIR}/.venv" ]; then
+      log "jupyter mode: no .venv yet (no requirements.txt); creating one with uv"
+      uv venv "${WORKSPACE_DIR}/.venv" --python 3.12 --seed >/dev/null 2>&1 || true
+    fi
+    log "jupyter not found; installing jupyterlab into .venv"
     if uv pip install --python "${WORKSPACE_DIR}/.venv/bin/python" --no-cache jupyterlab >/dev/null 2>&1; then
       export PATH="${WORKSPACE_DIR}/.venv/bin:${PATH}"
     else
-      log "WARN: jupyterlab install failed; use the jupyter workspace image"
+      log "WARN: jupyterlab install failed; use the prebuilt jupyter workspace image"
     fi
+  else
+    log "WARN: jupyter not found and uv unavailable; use the prebuilt jupyter image"
   fi
 fi
 

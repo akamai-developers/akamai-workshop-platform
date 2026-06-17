@@ -3,6 +3,10 @@
 # Per-student placeholders (sed): STUDENT_NUM, STUDENT_NUM_PADDED, PASSWORD_SECRET_NAME
 # Classroom-wide sentinels (sed): __NAMESPACE__, __WORKSPACE_IMAGE__, __VLLM_HOST__,
 #   __MODEL__, __CONTENT_REPO__  (filled from generate-pods.sh flags / helm values)
+# Some lines below are sentinels that generate-pods.sh fills with awk (editor env,
+# object storage, kubeconfig, OpenAI-client aliases, embedding) and DROPS in the default
+# shape. Never repeat a sentinel token in a comment — awk matches comment lines too and
+# would emit the block in the wrong place.
 
 apiVersion: v1
 kind: Pod
@@ -43,6 +47,8 @@ __WORKSPACE_TYPE_ENV__
           value: "__CONTENT_REPO__"
         - name: VLLM_API_KEY
           value: "__VLLM_API_KEY__"
+__EDITOR_ENV_ALIASES__
+__EMBEDDING_ENV__
       resources:
         requests:
           cpu: "250m"

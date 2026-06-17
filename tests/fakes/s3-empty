@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake bucket emptier for offline bats tests — stands in for `s3.py empty`. Logs its
+# args to $FAKE_S3_LOG and exits 0, so teardown's empty step is testable with no network.
+printf '%s\n' "$*" >> "${FAKE_S3_LOG:-/dev/null}"
+exit 0

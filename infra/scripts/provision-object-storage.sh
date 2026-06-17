@@ -24,6 +24,10 @@ set -euo pipefail
 # Empty --regions → 500; wrong value → 400. This script resolves the region id from
 # clusters-list before creating anything.
 #
+# Bucket create/list/delete go through the Linode REST API (curl), because linode-cli
+# v5.68+ removed the `object-storage buckets-*` actions ("Action not found") and the
+# `obj` S3 plugin needs boto3. Access keys still use linode-cli (keys-create/list/delete).
+#
 # Usage:
 #   ./provision-object-storage.sh -n 80 --region us-ord --prefix acme-workshop \
 #       --namespace workshop [--cluster-access scoped]
@@ -79,6 +83,42 @@ done
 if [[ -z "${LINODE_CLI_TOKEN:-}" ]]; then
     export LINODE_CLI_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}"
 fi
+
+# Bucket create/list/delete go through the Linode REST API, not linode-cli: linode-cli
+# v5.68+ dropped the `object-storage buckets-*` actions ("Action not found"), and the
+# `obj` S3 plugin needs boto3. Access keys (keys-create/list/delete) are still in the CLI
+# and stay there. Overridable so bats can point at a fake API base.
+OBJ_API="${OBJ_API:-https://api.linode.com/v4/object-storage}"
+
+# Bucket emptier used at teardown (the REST API refuses to delete a non-empty bucket).
+# s3.py is a stdlib-only SigV4 S3 client — no boto3, unlike `linode-cli obj`. Overridable
+# so bats can stub the network call.
+S3_EMPTY="${S3_EMPTY:-python3 ${SCRIPT_DIR}/s3.py empty}"
+
+# Create a bucket (region id, e.g. us-sea). Idempotent: a bucket you already own 2xxs.
+create_bucket() {
+    local region="$1" label="$2" code
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${OBJ_API}/buckets" \
+        -H "Authorization: Bearer ${LINODE_CLI_TOKEN}" -H "Content-Type: application/json" \
+        -d "{\"label\":\"${label}\",\"region\":\"${region}\"}")"
+    case "${code}" in
+        2*) return 0 ;;
+        *)  echo "  WARN: bucket create '${label}' (region ${region}) returned HTTP ${code}" >&2; return 1 ;;
+    esac
+}
+
+# Print the raw JSON list of all Object Storage buckets the token owns.
+list_buckets_json() {
+    curl -s "${OBJ_API}/buckets?page_size=500" -H "Authorization: Bearer ${LINODE_CLI_TOKEN}"
+}
+
+# Delete a bucket by region id + label (the bucket must be empty; emptying is best-effort
+# above via the obj plugin). Best-effort, like the rest of teardown.
+delete_bucket() {
+    local region="$1" label="$2"
+    curl -s -o /dev/null -X DELETE "${OBJ_API}/buckets/${region}/${label}" \
+        -H "Authorization: Bearer ${LINODE_CLI_TOKEN}" || true
+}
 
 if [[ -z "${PREFIX}" ]]; then
     echo "ERROR: --prefix is required (buckets are GLOBALLY unique — use the run label)." >&2
@@ -153,12 +193,15 @@ PY
 endpoint_url() { printf 'https://%s.linodeobjects.com' "${OBJ_CLUSTER_ID}"; }
 
 # ---------------------------------------------------------------------------
-# Teardown: revoke keys + empty/delete buckets matching the prefix. Idempotent.
+# Teardown: empty + delete buckets, THEN revoke keys. Emptying a bucket needs its own
+# key, so revocation MUST come last (revoking first leaves non-empty, undeletable
+# buckets). Matches the prefix; idempotent.
 # ---------------------------------------------------------------------------
 if [[ ${TEARDOWN} -eq 1 ]]; then
     resolve_region "${REGION}"
 
-    # Revoke every limited key whose label matches "<prefix>-sNN-key".
+    # Identify (do NOT yet revoke) keys whose label matches "<prefix>-sNN-key" — the
+    # revocation loop runs AFTER the buckets are emptied below.
     KEYS_JSON="$("${LINODECLI}" object-storage keys-list --json 2>/dev/null || true)"
     REVOKE_IDS="$(python3 - "${KEYS_JSON}" "${SAFE_PREFIX}" <<'PY'
 import json, re, sys
@@ -173,20 +216,16 @@ for k in data:
         print(k.get("id", ""))
 PY
 )"
-    for kid in ${REVOKE_IDS}; do
-        [[ -n "${kid}" ]] || continue
-        echo "  revoking object-storage key ${kid}"
-        "${LINODECLI}" object-storage keys-delete "${kid}" >/dev/null 2>&1 || true
-    done
 
     # Empty + delete every bucket matching "<prefix>-sNN". Use the per-student key
     # (from the CSV, if present) to empty objects; delete the bucket with the token.
-    BUCKETS_JSON="$("${LINODECLI}" object-storage buckets-list --json 2>/dev/null || true)"
+    BUCKETS_JSON="$(list_buckets_json 2>/dev/null || true)"
     DEL_BUCKETS="$(python3 - "${BUCKETS_JSON}" "${SAFE_PREFIX}" <<'PY'
 import json, re, sys
 prefix = sys.argv[2]
 try:
-    data = json.loads(sys.argv[1])
+    parsed = json.loads(sys.argv[1])
+    data = parsed.get("data", []) if isinstance(parsed, dict) else parsed
 except Exception:
     data = []
 pat = re.compile(r'^' + re.escape(prefix) + r'-s\d{2}$')
@@ -205,12 +244,21 @@ PY
             CREDS="$(awk -F, -v b="${bucket}" '$2==b {print $4" "$5}' "${CSV}" | head -1)"
             AK="$(awk '{print $1}' <<<"${CREDS}")"; SK="$(awk '{print $2}' <<<"${CREDS}")"
             if [[ -n "${AK}" && -n "${SK}" ]]; then
-                LINODE_CLI_OBJ_ACCESS_KEY="${AK}" LINODE_CLI_OBJ_SECRET_KEY="${SK}" \
-                    "${LINODECLI}" obj --cluster "${OBJ_REGION}" rb --recursive "s3://${bucket}" >/dev/null 2>&1 || true
+                # Empty the bucket with its OWN read_write key (stdlib SigV4, no boto3).
+                # Best-effort; the API delete below is the backstop for already-empty buckets.
+                ${S3_EMPTY} --endpoint "$(endpoint_url)" --region "${OBJ_REGION}" \
+                    --bucket "${bucket}" --access-key "${AK}" --secret-key "${SK}" >/dev/null 2>&1 || true
             fi
         fi
-        # Backstop: delete the (now-empty) bucket with the operator token.
-        "${LINODECLI}" object-storage buckets-delete "${OBJ_REGION}" "${bucket}" >/dev/null 2>&1 || true
+        # Delete the (now-empty) bucket via the REST API.
+        delete_bucket "${OBJ_REGION}" "${bucket}"
+    done
+
+    # Now that the buckets are empty + deleted, revoke the per-student keys.
+    for kid in ${REVOKE_IDS}; do
+        [[ -n "${kid}" ]] || continue
+        echo "  revoking object-storage key ${kid}"
+        "${LINODECLI}" object-storage keys-delete "${kid}" >/dev/null 2>&1 || true
     done
 
     # Drop the local state once buckets/keys are gone.
@@ -256,8 +304,8 @@ for i in $(seq 1 "${COUNT}"); do
         KEY_ID="${EXIST_KEYID[$i]}"; ACCESS_KEY="${EXIST_AK[$i]}"; SECRET_KEY="${EXIST_SK[$i]}"
     else
         NEW=$((NEW+1))
-        # Create the bucket (region id, not cluster id). Tolerate "already exists".
-        "${LINODECLI}" object-storage buckets-create --region "${OBJ_REGION}" --label "${BUCKET}" --json >/dev/null 2>&1 || true
+        # Create the bucket (region id, not cluster id) via the REST API. Idempotent.
+        create_bucket "${OBJ_REGION}" "${BUCKET}" || true
         # Mint a LIMITED key locked to this single bucket (read_write).
         KEY_JSON="$("${LINODECLI}" object-storage keys-create \
             --label "$(key_label "${PADDED}")" \

@@ -9,6 +9,62 @@ Extending the platform additively, behind flags that default to today's behaviou
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default
 `code-server` + `shared-vllm` path stays byte-identical.
 
+### Phase 8 — Workshop presets in the wizard + Solution Architect Agent default
+The component catalog (jupyter, scoped, object storage, …) shipped config-only — the
+wizard never surfaced it. This phase makes a workshop pickable in the wizard and makes
+the [Solution Architect Agent](https://github.com/akamai-developers/akamai-workshop-solution-architect-agent)
+workshop the interactive default, while the non-interactive (`--yes`) path stays
+byte-identical to the original platform.
+- **`deploy.sh`**: new **"Workshop"** step (step 3 of 7) and a `--preset`/`--workshop`
+  flag (+ `preset:` config key). `apply_preset()` fills only-unset values, so flags and
+  config always win and a no-preset deploy is unchanged. Presets:
+  `solution-architect-agent` (default; Jupyter · `Qwen/Qwen2.5-7B-Instruct` · scoped +
+  Object Storage + agent deploy), `ai-agents` (the original code-server default),
+  `own-inference`, and `custom`.
+- **`infra/scripts/sizing.py`**: added `Qwen/Qwen2.5-7B-Instruct` (the SA-agent model)
+  and `BAAI/bge-large-en-v1.5` — a 1024-dim **embedding** model in a new `embedding`
+  tier (zero KV cache, one replica on the smallest GPU node, `--task embed` args, no
+  tool-call flags). New `models-info` subcommand classifies a selection into chat vs
+  embedding; the wizard pairs an embedding model with a chat model behind the gateway
+  and rejects an embedding-only selection.
+- **Embedding is opt-in** (`--model "Qwen/Qwen2.5-7B-Instruct,BAAI/bge-large-en-v1.5"`),
+  not part of the SA-agent preset — no extra GPU cost by default.
+- **Workspace env wiring** (`workspace-pod-template.yaml`, `generate-pods.sh`): for any
+  non-`code-server` editor, inject `VLLM_BASE_URL`/`VLLM_MODEL_ID` (the OpenAI-client
+  names the SA-agent notebooks read) alongside the existing `VLLM_HOST`/`MODEL_NAME`;
+  inject `EMBEDDING_BASE_URL`/`EMBEDDING_MODEL_ID` when an embedding model is deployed;
+  the deployed agent (`agent_deploy: plain`) also gets `MODEL_PROVIDER=vllm`. All gated
+  so the default `code-server` workspace manifest stays byte-identical.
+- **`examples/sa-agent.yaml`**: retargeted to `Qwen/Qwen2.5-7B-Instruct` + the real
+  SA-agent content repo; **`config.example.yaml`** / **README**: document `preset`, the
+  Workshop step, the embedding model, and the dual env naming.
+- **Verification (offline)**: `sizing.py selftest` green (new chat + embedding asserts);
+  default dry-run shows no Components block; SA-preset and chat+embedding dry-runs render
+  coherent plans; default workspace manifest carries no aliases/embedding/sentinels.
+
+#### Fixes found running the SA-agent workshop on a live cluster
+- **`provision-object-storage.sh`**: bucket create/list/delete now go through the Linode
+  REST API (curl) instead of `linode-cli object-storage buckets-*`, which **v5.68+ removed**
+  ("Action not found") — the `obj` S3 plugin needs boto3. Access keys still use the CLI.
+  Without this, `object_storage: managed` (in the SA preset) failed every deploy at
+  "keys-create returned no key" because the bucket was never created. Offline fakes/tests
+  updated to assert the REST calls.
+- **`s3.py` (new) + teardown**: a stdlib-only (no boto3) SigV4 S3 client empties buckets at
+  teardown — the API refuses to delete a non-empty bucket and `linode-cli obj` needs boto3.
+  Also fixed teardown **ordering**: keys are now revoked AFTER the buckets are emptied (a
+  bucket is emptied with its own key, so revoking first left non-empty, undeletable buckets).
+  Verified live: a non-empty bucket empties + deletes cleanly.
+- **`startup.sh`**: jupyter mode now creates a `.venv` and installs `jupyterlab` even when
+  the content repo has **no `requirements.txt`** (the SA-agent repo installs deps
+  per-notebook). Previously the venv was only created when a requirements.txt existed, so
+  `exec jupyter` failed with 127 and every workspace pod crash-looped.
+- **`networkpolicy.yaml`**: under `cluster_access: scoped`, the shared vLLM (and the
+  multi-model gateway) now accept ingress from workspaces in the per-student namespaces
+  (`awp-student=true`), not just the shared namespace. Without this, **shared-vllm +
+  scoped** (the SA preset's shape) left every workspace unable to reach the model — the
+  `workshop` default-deny blocked the cross-namespace call. Gated on scoped, so the
+  default render stays byte-identical.
+
 ### Phase 6 — Example configs + operator affordances
 - **`examples/own-inference.yaml`** (jupyter + dedicated-vllm + 1 GPU/student + scoped +
   agent_deploy:plain) and **`examples/sa-agent.yaml`** (jupyter + shared-vllm/external + scoped

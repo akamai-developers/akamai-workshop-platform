@@ -8,13 +8,20 @@ set -euo pipefail
 #   ./deploy.sh teardown          destroy everything
 #   ./deploy.sh capacity-test     measure students-per-replica for a model (Phase 6)
 #
-# Answer ~5 questions (students / model / content repo / domain / region), see a
-# cost + sizing preview, confirm once, and get a running classroom + access-cards.csv.
+# Answer ~6 questions (students / workshop / model / content repo / domain / region),
+# see a cost + sizing preview, confirm once, get a running classroom + access-cards.csv.
+#
+# The "Workshop" step picks a preset (content + editor + model + components); the default
+# is the Solution Architect Agent (Jupyter). Pick non-interactively with --preset:
+#   ./deploy.sh --yes --preset solution-architect-agent --students 20
+#   (presets: solution-architect-agent | ai-agents | own-inference | custom)
 #
 # Non-interactive (for CI / the e2e smoke test):
 #   ./deploy.sh --yes --config config.yaml
 #   ./deploy.sh --yes --students 1 --model Qwen/Qwen3-4B-Instruct-2507 \
 #               --gpu-node-type g2-gpu-rtx4000a1-s --tp 1 --domain ""
+#   # add an embedding model for RAG (rides the multi-model gateway):
+#   ./deploy.sh --yes --model "Qwen/Qwen2.5-7B-Instruct,BAAI/bge-large-en-v1.5"
 #
 # Dry run (no cloud resources, no files written):
 #   ./deploy.sh --dry-run --students 80 --model Qwen/Qwen3-8B-FP8
@@ -76,6 +83,9 @@ ASSUME_YES=0
 DRY_RUN=0
 CONFIG=""
 VERB="deploy"
+# Workshop preset (a named content+editor+model+components composition). Empty by
+# default so a no-preset deploy stays byte-identical to the platform default.
+PRESET=""
 
 # ---------------------------------------------------------------------------
 # Formatting helpers (ANSI; degrades to plain text when not a TTY or NO_COLOR)
@@ -218,6 +228,8 @@ keys = {
  "cluster_access":"CLUSTER_ACCESS",
  "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
  "inference_endpoint":"INFERENCE_ENDPOINT","inference_api_key":"INFERENCE_API_KEY",
+ # Workshop preset (a named composition; see apply_preset). 'workshop' is an alias.
+ "preset":"PRESET","workshop":"PRESET",
 }
 for raw in open(sys.argv[1]):
     line = raw.split("#",1)[0].rstrip()
@@ -268,6 +280,7 @@ while [[ $# -gt 0 ]]; do
         --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
         --inference-endpoint) INFERENCE_ENDPOINT="$2"; shift 2 ;;
         --inference-api-key)  INFERENCE_API_KEY="$2"; shift 2 ;;
+        --preset|--workshop) PRESET="$2"; shift 2 ;;
         -y|--yes)            ASSUME_YES=1; shift ;;
         --dry-run)           DRY_RUN=1; shift ;;
         --list-models)       python3 "${SCRIPTS}/sizing.py" catalog; exit 0 ;;
@@ -289,7 +302,46 @@ fi
 # ===========================================================================
 interactive() { [[ $ASSUME_YES -eq 0 && $DRY_RUN -eq 0 && -t 0 ]]; }
 
-TOTAL_STEPS=6
+# ---------------------------------------------------------------------------
+# Workshop presets. A preset is a named composition (content + editor + model +
+# components). The interactive "Workshop" step and the --preset flag both apply one.
+# Presets FILL ONLY UNSET values (`:=`), so explicit flags / config always win — and a
+# deploy with NO preset (the --yes / CI path) stays byte-identical to the platform
+# default. To add a workshop, add a case here and a menu line in the Workshop step.
+# ---------------------------------------------------------------------------
+apply_preset() {
+    case "${1:-}" in
+        ''|custom)
+            : ;;   # no preset — prompts and flags decide everything (today's behavior)
+        solution-architect-agent|sa-agent|sa)
+            # The Akamai Cloud Solutions Architect agent workshop (Jupyter notebooks).
+            : "${CONTENT_REPO:=https://github.com/akamai-developers/akamai-workshop-solution-architect-agent}"
+            : "${EDITOR:=jupyter}"
+            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen2.5-7B-Instruct"
+            : "${INFERENCE:=shared-vllm}"
+            : "${CLUSTER_ACCESS:=scoped}"     # module 8 deploys the agent into the student's ns
+            : "${OBJECT_STORAGE:=managed}"    # module 4 stores durable memory in a per-student bucket
+            : "${AGENT_DEPLOY:=plain}"        # capstone: ship the agent (Deployment+Service)
+            ;;
+        ai-agents|ai-agents-workshop|default)
+            # The original platform default — every value equals today's behavior.
+            : "${EDITOR:=code-server}"
+            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-8B-FP8"
+            ;;
+        own-inference|own-your-inference)
+            # Each student runs + tunes their own dedicated vLLM from a notebook.
+            : "${EDITOR:=jupyter}"
+            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-4B-Instruct-2507"
+            : "${INFERENCE:=dedicated-vllm}"
+            : "${CLUSTER_ACCESS:=scoped}"
+            : "${AGENT_DEPLOY:=plain}"
+            ;;
+        *)
+            err "unknown preset '${1}' (use: solution-architect-agent | ai-agents | own-inference | custom)" ;;
+    esac
+}
+
+TOTAL_STEPS=7
 
 # Seed wizard defaults from the previous deployment. terraform.tfvars survives
 # teardown precisely so a re-deploy can offer the same answers back — without
@@ -333,8 +385,42 @@ if interactive; then
         ok "pre-set: ${STUDENTS} students"
     fi
 
-    # -- Step 3: Model selection --
-    step_header 3 $TOTAL_STEPS "Model selection"
+    # -- Step 3: Workshop preset --
+    # A workshop bundles its content repo, editor, model, and component composition.
+    # Selecting one pre-fills the Model and Content steps below. Skipped when a preset
+    # or any composition signal (model/content/component flag or config) is already set.
+    step_header 3 $TOTAL_STEPS "Workshop"
+    if [[ -n "$PRESET" ]]; then
+        apply_preset "$PRESET"
+        ok "pre-set: ${PRESET}"
+    elif [[ -n "${MODEL}${MODELS}${CONTENT_REPO}${EDITOR}${INFERENCE}${CLUSTER_ACCESS}${OBJECT_STORAGE}${AGENT_DEPLOY}" ]]; then
+        ok "composition pre-set by flags/config"
+    else
+        printf '%b\n' "        ${DIM}A workshop bundles its content, editor, model, and components.${RESET}"
+        echo ""
+        printf '%b\n' "        ${GREEN}${BOLD} 1${RESET}${GREEN}*${RESET} Solution Architect Agent  ${DIM}Jupyter · Qwen2.5-7B-Instruct · scoped + Object Storage + deploy${RESET}"
+        printf '%b\n' "        ${CYAN}${BOLD} 2${RESET}  AI Agents                 ${DIM}code-server · Qwen3-8B-FP8 (the original platform default)${RESET}"
+        printf '%b\n' "        ${CYAN}${BOLD} 3${RESET}  Own-your-inference        ${DIM}Jupyter · per-student dedicated GPU to tune${RESET}"
+        printf '%b\n' "        ${CYAN}${BOLD} 4${RESET}  Custom                    ${DIM}choose model, content, and components yourself${RESET}"
+        echo ""
+        printf '%b\n' "        ${DIM}* = default${RESET}"
+        while true; do
+            printf '%b' "        ${BOLD}Select${RESET} ${DIM}[1]${RESET} "
+            read -r _WPICK
+            case "${_WPICK:-1}" in
+                1) PRESET="solution-architect-agent"; break ;;
+                2) PRESET="ai-agents"; break ;;
+                3) PRESET="own-inference"; break ;;
+                4) PRESET="custom"; break ;;
+                *) printf '%b\n' "        ${RED}Enter 1-4.${RESET}" ;;
+            esac
+        done
+        apply_preset "$PRESET"
+        ok "${PRESET}"
+    fi
+
+    # -- Step 4: Model selection --
+    step_header 4 $TOTAL_STEPS "Model selection"
     if [[ -z "$MODELS" && -z "$MODEL" ]]; then
         # Get the formatted table and numbered catalog from sizing.py
         _TABLE_OUTPUT="$(python3 "${SCRIPTS}/sizing.py" wizard-table)"
@@ -387,19 +473,23 @@ if interactive; then
         ok "pre-set: ${MODEL}"
     fi
 
-    # -- Step 4: Workshop content --
-    if [[ -z "$CONTENT_REPO" ]]; then
-        step_header 4 $TOTAL_STEPS "Workshop content"
+    # -- Step 5: Workshop content --
+    if [[ -n "$CONTENT_REPO" ]]; then
+        step_header 5 $TOTAL_STEPS "Workshop content"
+        ok "pre-set: ${CONTENT_REPO}"
+    elif [[ -n "$PRESET" && "$PRESET" != custom ]]; then
+        # A named preset chose its content (blank → that workshop's default repo).
+        step_header 5 $TOTAL_STEPS "Workshop content"
+        ok "default for the ${PRESET} workshop"
+    else
+        step_header 5 $TOTAL_STEPS "Workshop content"
         printf '%b\n' "        ${DIM}Blank = the default Akamai AI-agents workshop${RESET}"
         printf '%b\n' "        ${DIM}Or enter a git URL or owner/repo to use your own${RESET}"
         prompt_input "Content repo" "" CONTENT_REPO
-    else
-        step_header 4 $TOTAL_STEPS "Workshop content"
-        ok "pre-set: ${CONTENT_REPO}"
     fi
 
-    # -- Step 5: Domain & TLS --
-    step_header 5 $TOTAL_STEPS "Domain & TLS"
+    # -- Step 6: Domain & TLS --
+    step_header 6 $TOTAL_STEPS "Domain & TLS"
     if [[ -z "$DOMAIN" ]]; then
         if [[ -n "$_PREV_DOMAIN" ]]; then
             printf '%b\n' "        ${DIM}Default carried over from your last deploy; type 'none' for sslip.io + self-signed TLS${RESET}"
@@ -425,8 +515,8 @@ if interactive; then
         ok "pre-set: ${DOMAIN}"
     fi
 
-    # -- Step 6: Region --
-    step_header 6 $TOTAL_STEPS "Region"
+    # -- Step 7: Region --
+    step_header 7 $TOTAL_STEPS "Region"
     if [[ -z "$REGION" ]]; then
         printf '%b\n' "        ${DIM}Discovering GPU-capable regions...${RESET}"
         echo ""
@@ -437,26 +527,40 @@ if interactive; then
     fi
 fi
 
+# ---- Apply the workshop preset (fills only-unset values; flags/config already won) ----
+# Interactive mode already applied it in the Workshop step; this covers --preset and a
+# `preset:` config key. With no preset it is a no-op, so the default deploy is unchanged.
+apply_preset "$PRESET"
+
 # ---- Defaults for anything still empty ----
 STUDENTS="${STUDENTS:-80}"
 # Normalize: --model sets MODELS; legacy MODEL var is an alias.
 [[ -n "$MODEL" && -z "$MODELS" ]] && MODELS="$MODEL"
 MODELS="${MODELS:-Qwen/Qwen3-8B-FP8}"
-# Detect multi-model: if MODELS contains a comma, set MULTI_MODEL=1.
+
+# Classify the selection into chat vs embedding models (also validates every id). An
+# embedding model (e.g. BAAI/bge-large-en-v1.5) is NEVER the chat model — it rides the
+# multi-model gateway next to one, serving /v1/embeddings for RAG.
+MODELS_INFO="$(python3 "${SCRIPTS}/sizing.py" models-info --models "$MODELS")" \
+    || err "model selection invalid (see message above)"
+eval "$MODELS_INFO"   # sets CHAT_MODELS and EMBEDDING_MODELS
+[[ -n "$CHAT_MODELS" ]] || err "no chat model selected — an embedding model must be paired with a chat model, e.g. --model \"Qwen/Qwen2.5-7B-Instruct,BAAI/bge-large-en-v1.5\"."
+EMBEDDING_MODEL="${EMBEDDING_MODELS%%,*}"   # first embedding model, or empty
+
+# Multi-model (agentgateway routing) whenever more than one model is deployed —
+# chat+chat OR chat+embedding both need per-model backends behind the gateway.
 if [[ "$MODELS" == *,* ]]; then
     MULTI_MODEL=1
-    # Default MODEL_NAME stamped into workspaces: prefer the catalog default
-    # (Qwen3-8B — the model the workshop content is tuned for) when it's in the
-    # selected set, otherwise the first model. Avoids defaulting students onto a
-    # model that may need extra per-model tuning.
-    if [[ ",$MODELS," == *",Qwen/Qwen3-8B-FP8,"* ]]; then
-        MODEL="Qwen/Qwen3-8B-FP8"
-    else
-        MODEL="${MODELS%%,*}"
-    fi
 else
     MULTI_MODEL=0
-    MODEL="$MODELS"
+fi
+# MODEL = the chat model stamped into workspaces (MODEL_NAME / VLLM_MODEL_ID). Prefer
+# the catalog default (Qwen3-8B — what the default content is tuned for) when it's among
+# the chat models, otherwise the first chat model.
+if [[ ",$CHAT_MODELS," == *",Qwen/Qwen3-8B-FP8,"* ]]; then
+    MODEL="Qwen/Qwen3-8B-FP8"
+else
+    MODEL="${CHAT_MODELS%%,*}"
 fi
 REGION="${REGION:-us-ord}"
 
@@ -973,6 +1077,9 @@ GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
     --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY"
     --object-storage "$OBJECT_STORAGE")
+# An embedding model rides the gateway alongside the chat model: workspaces get its id
+# as EMBEDDING_MODEL_ID and EMBEDDING_BASE_URL=VLLM_HOST (the same gateway) for RAG.
+[[ -n "$EMBEDDING_MODEL" ]] && GEN_PODS_ARGS+=(--embedding-model "$EMBEDDING_MODEL")
 if [[ $MULTI_MODEL -eq 0 ]]; then
     GEN_PODS_ARGS+=(--model "$MODEL")
     if [[ "$INFERENCE" == "external" ]]; then
@@ -1039,6 +1146,8 @@ echo ""
 printf "  ${DIM}%-14s${RESET} %s\n" "Base host:"    "$BASE_HOST"
 printf "  ${DIM}%-14s${RESET} %s\n" "Model(s):"     "${MODELS//,/, }"
 printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"    "${INFER_EP}  (in-cluster only)"
+[[ -n "$EMBEDDING_MODEL" ]] && \
+    printf "  ${DIM}%-14s${RESET} %s\n" "Embedding:"  "${EMBEDDING_MODEL}  (\$EMBEDDING_BASE_URL → gateway)"
 if [[ -n "$GATEWAY_API_KEY" ]]; then
     printf "  ${DIM}%-14s${RESET} %s\n" "API key:"      "$GATEWAY_API_KEY"
     printf '%b\n' "  ${DIM}               injected into every workspace as \$VLLM_API_KEY (sent as Bearer);${RESET}"
