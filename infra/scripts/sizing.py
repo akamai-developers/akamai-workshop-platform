@@ -38,6 +38,9 @@ import sys
 # The tool-call flags (--enable-auto-tool-choice --tool-call-parser=hermes) are safe
 # for most models and applied by default. The reasoning parser is DeepSeek-only.
 _DEEPSEEK_ARGS = ["--reasoning-parser=deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser=hermes"]
+# Hybrid Qwen3 (e.g. Qwen3-4B): same <think></think> format as DeepSeek-R1-Qwen3, so the
+# deepseek_r1 reasoning parser + hermes tool parser apply unchanged. Aliased for clarity.
+_QWEN3_THINK_ARGS = _DEEPSEEK_ARGS
 _TOOL_CALL_ARGS = ["--enable-auto-tool-choice", "--tool-call-parser=hermes"]
 _GLM_ARGS = ["--enable-auto-tool-choice", "--tool-call-parser=glm47"]
 # gpt-oss uses the harmony format, NOT hermes — the hermes tool parser crashes on it
@@ -50,8 +53,12 @@ _EMBED_ARGS = ["--task", "embed"]
 
 MODEL_CATALOG = {
     "Qwen/Qwen3-4B-Instruct-2507":                   {"vram_gb": 12, "tier": "small",
-        "num_layers": 36, "num_kv_heads": 4, "head_dim": 128, "kv_dtype_bytes": 2,
+        "num_layers": 36, "num_kv_heads": 8, "head_dim": 128, "kv_dtype_bytes": 2,
         "vllm_args": _TOOL_CALL_ARGS},
+    "Qwen/Qwen3-4B":                                 {"vram_gb": 12, "tier": "small",
+        "num_layers": 36, "num_kv_heads": 8, "head_dim": 128, "kv_dtype_bytes": 2,
+        "vllm_args": _QWEN3_THINK_ARGS,
+        "note": "hybrid Qwen3 (enable_thinking toggles); reasons before tool calls"},
     "Qwen/Qwen2.5-7B-Instruct":                      {"vram_gb": 16, "tier": "small",
         "num_layers": 28, "num_kv_heads": 4, "head_dim": 128, "kv_dtype_bytes": 2,
         "vllm_args": _TOOL_CALL_ARGS,

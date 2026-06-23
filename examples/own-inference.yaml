@@ -10,7 +10,7 @@
 # region — reserve capacity ahead and run `infra/scripts/regions.sh preflight`.
 
 students:     12
-model:        Qwen/Qwen3-4B-Instruct-2507   # small model so a 1-GPU plan fits; see `sizing.py catalog`
+model:        Qwen/Qwen3-4B   # hybrid thinking model (reasons before tool calls); fits a 1-GPU plan
 content_repo: ""                            # point at the own-inference lessons repo
 domain:       ""                            # "" → sslip.io + self-signed TLS
 region:       us-ord

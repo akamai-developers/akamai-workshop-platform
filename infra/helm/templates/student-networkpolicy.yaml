@@ -71,6 +71,14 @@ spec:
         - podSelector:
             matchLabels:
               app: workspace
+        {{- /* agent_deploy: the student's deployed agent (app=agent) reaches vLLM in
+               its own namespace too. Without this, the Module 9 capstone is dropped
+               under default-deny on an enforcing CNI. */}}
+        {{- if ne $root.Values.agent_deploy "none" }}
+        - podSelector:
+            matchLabels:
+              app: agent
+        {{- end }}
       ports:
         - protocol: TCP
           port: 8000

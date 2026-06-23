@@ -89,6 +89,12 @@ spec:
             - --max-model-len={{ $root.Values.dedicated_max_model_len }}
             - --host=0.0.0.0
             - --port=8000
+            {{- /* Model-specific catalog args (reasoning/tool parsers). The shared
+                   vLLM template ranges over these too; the dedicated path must match
+                   or it ships with no tool-call/reasoning parser. */}}
+            {{- range $root.Values.vllm_extra_args }}
+            - {{ . | quote }}
+            {{- end }}
           env:
             - name: HUGGING_FACE_HUB_TOKEN
               valueFrom:

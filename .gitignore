@@ -239,3 +239,4 @@ BUILD_PROGRESS.md
 build-logs/
 .build/
 infra/terraform/terraform.tfstate.*.backup
+WORKSHOP_INTEGRATION_NOTES.md

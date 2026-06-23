@@ -331,7 +331,7 @@ apply_preset() {
         own-inference|own-your-inference)
             # Each student runs + tunes their own dedicated vLLM from a notebook.
             : "${EDITOR:=jupyter}"
-            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-4B-Instruct-2507"
+            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-4B"
             : "${INFERENCE:=dedicated-vllm}"
             : "${CLUSTER_ACCESS:=scoped}"
             : "${AGENT_DEPLOY:=plain}"
