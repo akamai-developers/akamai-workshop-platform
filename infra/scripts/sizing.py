@@ -38,9 +38,11 @@ import sys
 # The tool-call flags (--enable-auto-tool-choice --tool-call-parser=hermes) are safe
 # for most models and applied by default. The reasoning parser is DeepSeek-only.
 _DEEPSEEK_ARGS = ["--reasoning-parser=deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser=hermes"]
-# Hybrid Qwen3 (e.g. Qwen3-4B): same <think></think> format as DeepSeek-R1-Qwen3, so the
-# deepseek_r1 reasoning parser + hermes tool parser apply unchanged. Aliased for clarity.
-_QWEN3_THINK_ARGS = _DEEPSEEK_ARGS
+# Hybrid Qwen3 (e.g. Qwen3-4B) toggles thinking via enable_thinking. The deepseek_r1
+# reasoning parser mis-handles enable_thinking=false: it files the whole answer into
+# reasoning_content and leaves content empty (vLLM issue #19222). The qwen3 reasoning
+# parser handles both modes correctly and pairs with the hermes tool parser.
+_QWEN3_THINK_ARGS = ["--reasoning-parser=qwen3", "--enable-auto-tool-choice", "--tool-call-parser=hermes"]
 _TOOL_CALL_ARGS = ["--enable-auto-tool-choice", "--tool-call-parser=hermes"]
 _GLM_ARGS = ["--enable-auto-tool-choice", "--tool-call-parser=glm47"]
 # gpt-oss uses the harmony format, NOT hermes — the hermes tool parser crashes on it
