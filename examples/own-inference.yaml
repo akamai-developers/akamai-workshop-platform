@@ -9,11 +9,11 @@
 # GPU STOCK is the #1 constraint here: this provisions one GPU per student in ONE
 # region — reserve capacity ahead and run `infra/scripts/regions.sh preflight`.
 
-students:     12
+students:     2                # TEST size: 1 GPU per student. Raise for the real room (was 12).
 model:        Qwen/Qwen3-4B   # hybrid thinking model (reasons before tool calls); fits a 1-GPU plan
-content_repo: ""                            # point at the own-inference lessons repo
+content_repo: https://github.com/akamai-developers/akamai-workshop-ai-inference   # enhanced lessons, on main
 domain:       ""                            # "" → sslip.io + self-signed TLS
-region:       us-ord
+region:       us-sea
 
 # --- Components (config-only; the wizard never prompts for these) ---
 editor:           jupyter          # students edit + apply manifests from a notebook

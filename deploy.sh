@@ -330,6 +330,7 @@ apply_preset() {
             ;;
         own-inference|own-your-inference)
             # Each student runs + tunes their own dedicated vLLM from a notebook.
+            : "${CONTENT_REPO:=https://github.com/akamai-developers/akamai-workshop-ai-inference}"
             : "${EDITOR:=jupyter}"
             [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-4B"
             : "${INFERENCE:=dedicated-vllm}"
@@ -1132,7 +1133,21 @@ if [[ "$OBJECT_STORAGE" == "managed" ]]; then
         --namespace "$NAMESPACE" --cluster-access "$CLUSTER_ACCESS"
 fi
 
-kubectl apply -f "${GEN_DIR}/"
+# The ingress-nginx admission webhook (installed by Terraform) must have a ready
+# backend before any Ingress is applied, or kubectl fails the webhook call with
+# "context deadline exceeded" and the whole deploy errors on its last step. Wait for
+# the controller, then apply with a short retry so a webhook that is still registering
+# its endpoint does not break a fresh-cluster deploy.
+echo "  Waiting for the ingress-nginx admission webhook to be ready..."
+kubectl wait --namespace ingress-nginx --for=condition=ready pod \
+    --selector=app.kubernetes.io/component=controller --timeout=180s 2>/dev/null || true
+
+for _attempt in 1 2 3 4 5 6; do
+    if kubectl apply -f "${GEN_DIR}/"; then break; fi
+    [[ $_attempt -eq 6 ]] && err "kubectl apply -f ${GEN_DIR}/ failed after retries (ingress-nginx webhook not ready)."
+    echo "  apply hit the ingress webhook before it was ready (attempt ${_attempt}); retrying in 10s..."
+    sleep 10
+done
 
 # ---- Done ----
 CSV="${GEN_DIR}/access-cards.csv"
