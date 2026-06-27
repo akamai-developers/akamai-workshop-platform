@@ -1050,6 +1050,7 @@ model: ${MODEL}
 replicas: ${REPLICAS}
 tensor_parallel_size: ${TP}
 max_model_len: ${MAX_MODEL_LEN}
+dedicated_max_model_len: ${MAX_MODEL_LEN}
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 content_repo: "${CONTENT_REPO}"
@@ -1091,6 +1092,7 @@ multi_model: true
 models:
 ${MODELS_YAML}
 max_model_len: ${MAX_MODEL_LEN}
+dedicated_max_model_len: ${MAX_MODEL_LEN}
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 vllm_host: http://agentgateway:8080/v1
