@@ -27,6 +27,18 @@ model_cache_size: 50Gi
 # restart-from-cache, not a re-download. Empty (default) → vLLM just downloads the one
 # served model on first start. Keep model_cache_size large enough for every listed model.
 predownload_models: ""
+# --- Model mirror (optional) -------------------------------------------------
+# When model_mirror_bucket is set, each student vLLM syncs models from an in-region
+# Linode Object Storage bucket (seeded once by `make mirror-models`) instead of
+# huggingface.co — avoids HF rate-limiting at 200-pod scale. Takes priority over
+# predownload_models. Empty (default) → HF behavior, render unchanged.
+model_mirror_bucket: ""
+model_mirror_endpoint: ""          # https://us-sea-1.linodeobjects.com
+model_mirror_region: ""            # us-sea (SigV4 signing region)
+model_mirror_prefix: "hf-cache"    # bucket key prefix synced into download_dir
+model_mirror_image: "amazon/aws-cli:latest"
+model_mirror_access_key: ""        # read-only key, rendered into the model-mirror-s3 Secret
+model_mirror_secret_key: ""
 shm_size: 8Gi
 vllm_cpu_request: "4"
 vllm_mem_request: 16Gi

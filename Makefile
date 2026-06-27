@@ -14,7 +14,7 @@
 ARGS ?=
 CONFIG ?=
 
-.PHONY: deploy teardown capacity-test dry-run refresh-content models sizing-selftest verify-default verify-config help
+.PHONY: deploy teardown capacity-test dry-run refresh-content mirror-models models sizing-selftest verify-default verify-config help
 
 deploy: ## Provision a classroom (interactive unless ARGS add --yes/--config)
 	./deploy.sh deploy $(ARGS)
@@ -30,6 +30,9 @@ capacity-test: ## Measure students-per-replica for a model (Phase 6)
 
 refresh-content: ## Pull the latest content repo into every running student workspace (ARGS: --ref/--keep-edits/--namespace)
 	./infra/scripts/refresh-content.sh $(ARGS)
+
+mirror-models: ## Seed an Object Storage model mirror (one-time; avoids HF rate limits at scale). ARGS: --bucket NAME [--region us-sea]
+	./infra/scripts/mirror-models.sh $(ARGS)
 
 models: ## List the ungated model catalog
 	python3 infra/scripts/sizing.py catalog

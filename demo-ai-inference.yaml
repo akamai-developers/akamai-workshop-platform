@@ -1,0 +1,17 @@
+# AI-inference workshop — rehearsal config (2 students).
+# Token comes from $TF_VAR_token / $LINODE_TOKEN, never this file.
+# Bump `students` to 200 for the real run (after the GPU quota is raised).
+preset: own-inference          # jupyter + dedicated-vllm + scoped + inference content repo
+label: demo-ai-inference-1
+students: 2
+
+# Served model (overrides the preset's Qwen3-4B). Single value = single-model mode.
+model: RedHatAI/Qwen3-4B-FP8-dynamic
+
+# Pre-pull all three into each student's PVC so switch_model() is a fast restart-from-cache.
+predownload_models: "RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B"
+
+domain: ws.akamai-workshops.com
+region: us-ord
+
+# agent_deploy: none           # uncomment if the inference content ships no agent (preset defaults to plain)

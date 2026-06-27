@@ -72,6 +72,12 @@ EDITOR=""            # code-server (default) | jupyter
 INFERENCE=""         # shared-vllm (default) | dedicated-vllm | external
 GPUS_PER_STUDENT=""  # 1 (default); 2 reserved/v2
 PREDOWNLOAD_MODELS=""  # dedicated-vllm: comma-separated models to pre-cache in each PVC
+MODEL_MIRROR_BUCKET=""        # set => pull models from an Object Storage mirror, not HF
+MODEL_MIRROR_ENDPOINT=""
+MODEL_MIRROR_REGION=""
+MODEL_MIRROR_PREFIX=""
+MODEL_MIRROR_ACCESS_KEY=""
+MODEL_MIRROR_SECRET_KEY=""
 GPU_SHARING=""       # none (default) | timeslicing; mps reserved/v2
 GPU_TIMESLICING_REPLICAS=""  # logical GPUs/card when gpu_sharing=timeslicing (default 2)
 CLUSTER_ACCESS=""    # none (default) | scoped
@@ -226,6 +232,9 @@ keys = {
  "editor":"EDITOR","workspace_type":"EDITOR","inference":"INFERENCE",
  "gpus_per_student":"GPUS_PER_STUDENT","gpu_sharing":"GPU_SHARING",
  "predownload_models":"PREDOWNLOAD_MODELS",
+ "model_mirror_bucket":"MODEL_MIRROR_BUCKET","model_mirror_endpoint":"MODEL_MIRROR_ENDPOINT",
+ "model_mirror_region":"MODEL_MIRROR_REGION","model_mirror_prefix":"MODEL_MIRROR_PREFIX",
+ "model_mirror_access_key":"MODEL_MIRROR_ACCESS_KEY","model_mirror_secret_key":"MODEL_MIRROR_SECRET_KEY",
  "gpu_timeslicing_replicas":"GPU_TIMESLICING_REPLICAS",
  "cluster_access":"CLUSTER_ACCESS",
  "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
@@ -593,6 +602,17 @@ EDITOR="${EDITOR:-code-server}"
 INFERENCE="${INFERENCE:-shared-vllm}"
 GPUS_PER_STUDENT="${GPUS_PER_STUDENT:-1}"
 PREDOWNLOAD_MODELS="${PREDOWNLOAD_MODELS:-}"
+# Model mirror: if not set via config/flags, auto-pick up what `make mirror-models` wrote.
+if [[ -z "$MODEL_MIRROR_BUCKET" && -f "${INFRA}/manifests/generated/model-mirror.conf" ]]; then
+    # shellcheck disable=SC1091
+    source "${INFRA}/manifests/generated/model-mirror.conf"
+fi
+MODEL_MIRROR_BUCKET="${MODEL_MIRROR_BUCKET:-}"
+MODEL_MIRROR_ENDPOINT="${MODEL_MIRROR_ENDPOINT:-}"
+MODEL_MIRROR_REGION="${MODEL_MIRROR_REGION:-}"
+MODEL_MIRROR_PREFIX="${MODEL_MIRROR_PREFIX:-hf-cache}"
+MODEL_MIRROR_ACCESS_KEY="${MODEL_MIRROR_ACCESS_KEY:-}"
+MODEL_MIRROR_SECRET_KEY="${MODEL_MIRROR_SECRET_KEY:-}"
 GPU_SHARING="${GPU_SHARING:-none}"
 GPU_TIMESLICING_REPLICAS="${GPU_TIMESLICING_REPLICAS:-2}"
 CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
@@ -785,7 +805,11 @@ if components_nondefault; then
     else
         printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "$INFERENCE"
     fi
-    [[ -n "$PREDOWNLOAD_MODELS" ]] && printf "  ${DIM}%-14s${RESET} %s\n" "Pre-cache:" "$PREDOWNLOAD_MODELS"
+    if [[ -n "$MODEL_MIRROR_BUCKET" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "Model mirror:" "s3://${MODEL_MIRROR_BUCKET} (${MODEL_MIRROR_REGION})"
+    elif [[ -n "$PREDOWNLOAD_MODELS" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "Pre-cache:" "$PREDOWNLOAD_MODELS"
+    fi
     if [[ "$GPU_SHARING" != "none" ]]; then
         printf "  ${DIM}%-14s${RESET} %s\n" "GPU sharing:" "${GPU_SHARING} (${GPU_TIMESLICING_REPLICAS} logical GPUs/card)"
     fi
@@ -989,6 +1013,12 @@ editor: ${EDITOR}
 inference: ${INFERENCE}
 gpus_per_student: ${GPUS_PER_STUDENT}
 predownload_models: "${PREDOWNLOAD_MODELS}"
+model_mirror_bucket: "${MODEL_MIRROR_BUCKET}"
+model_mirror_endpoint: "${MODEL_MIRROR_ENDPOINT}"
+model_mirror_region: "${MODEL_MIRROR_REGION}"
+model_mirror_prefix: "${MODEL_MIRROR_PREFIX}"
+model_mirror_access_key: "${MODEL_MIRROR_ACCESS_KEY}"
+model_mirror_secret_key: "${MODEL_MIRROR_SECRET_KEY}"
 gpu_sharing: ${GPU_SHARING}
 gpu_timeslicing_replicas: ${GPU_TIMESLICING_REPLICAS}
 cluster_access: ${CLUSTER_ACCESS}

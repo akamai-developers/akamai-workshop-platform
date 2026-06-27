@@ -71,7 +71,44 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
-      {{- if $root.Values.predownload_models }}
+      {{- if $root.Values.model_mirror_bucket }}
+      # Pull models from the in-region Object Storage mirror (seeded by `make mirror-models`)
+      # instead of huggingface.co — avoids HF rate-limiting at scale. Read-only keyed access
+      # (model-mirror-s3 Secret); aws s3 sync handles the file tree + resume. Takes priority
+      # over predownload_models.
+      initContainers:
+        - name: pull-models-from-mirror
+          image: {{ $root.Values.model_mirror_image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              SRC="s3://{{ $root.Values.model_mirror_bucket }}/{{ $root.Values.model_mirror_prefix }}"
+              echo "Syncing $SRC -> {{ $root.Values.download_dir }}"
+              aws s3 sync "$SRC" "{{ $root.Values.download_dir }}" \
+                --endpoint-url "{{ $root.Values.model_mirror_endpoint }}" --only-show-errors
+              echo "mirror sync complete"
+          envFrom:
+            - secretRef:
+                name: model-mirror-s3
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: {{ $root.Values.model_mirror_region | quote }}
+            # Linode S3 rejects the checksums recent aws-cli v2 sends by default.
+            - name: AWS_REQUEST_CHECKSUM_CALCULATION
+              value: "when_required"
+            - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+              value: "when_required"
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ $root.Values.download_dir }}
+      {{- else if $root.Values.predownload_models }}
       # Pre-pull every workshop model into the PVC so switching the served model later
       # (kubectl patch of --model + the Recreate restart above) loads from cache instead
       # of re-downloading. Idempotent: snapshot_download skips models already present.
