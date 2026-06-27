@@ -229,6 +229,7 @@ infra/terraform/terraform.tfstate.backup
 infra/terraform/.terraform/
 infra/terraform/.terraform.lock.hcl
 infra/kubeconfig.yaml
+infra/model-mirror.conf
 infra/.certs/
 
 # Autonomous build scaffolding (not part of the feature)

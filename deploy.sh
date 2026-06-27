@@ -603,9 +603,11 @@ INFERENCE="${INFERENCE:-shared-vllm}"
 GPUS_PER_STUDENT="${GPUS_PER_STUDENT:-1}"
 PREDOWNLOAD_MODELS="${PREDOWNLOAD_MODELS:-}"
 # Model mirror: if not set via config/flags, auto-pick up what `make mirror-models` wrote.
-if [[ -z "$MODEL_MIRROR_BUCKET" && -f "${INFRA}/manifests/generated/model-mirror.conf" ]]; then
+# Path is overridable so tests stay hermetic (helper.bash points it at /dev/null).
+MODEL_MIRROR_CONF="${MODEL_MIRROR_CONF:-${INFRA}/model-mirror.conf}"
+if [[ -z "$MODEL_MIRROR_BUCKET" && -f "$MODEL_MIRROR_CONF" ]]; then
     # shellcheck disable=SC1091
-    source "${INFRA}/manifests/generated/model-mirror.conf"
+    source "$MODEL_MIRROR_CONF"
 fi
 MODEL_MIRROR_BUCKET="${MODEL_MIRROR_BUCKET:-}"
 MODEL_MIRROR_ENDPOINT="${MODEL_MIRROR_ENDPOINT:-}"

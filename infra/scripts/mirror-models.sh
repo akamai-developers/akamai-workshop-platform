@@ -21,7 +21,9 @@ ROOT_DIR="$(dirname "$INFRA_DIR")"
 # Run Python via the project .venv when present (repo convention; it holds the deps).
 PY="python3"; [[ -x "${ROOT_DIR}/.venv/bin/python" ]] && PY="${ROOT_DIR}/.venv/bin/python"
 GENERATED="${INFRA_DIR}/manifests/generated"
-CONF="${GENERATED}/model-mirror.conf"
+# Durable: lives OUTSIDE generated/ so `make teardown` (rm -rf generated/) can't wipe the
+# mirror pointer/key while the mirror bucket itself survives. Auto-sourced by deploy.sh.
+CONF="${INFRA_DIR}/model-mirror.conf"
 LINODECLI="${LINODECLI:-linode-cli}"
 OBJ_API="${OBJ_API:-https://api.linode.com/v4/object-storage}"
 
@@ -33,6 +35,7 @@ REGION="us-sea"
 BUCKET=""
 PREFIX="hf-cache"
 MODELS="RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B"
+SKIP_SEED=0   # --skip-seed: bucket already has the models; just refresh the read-only key + conf
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --bucket) BUCKET="$2"; shift 2 ;;
         --prefix) PREFIX="$2"; shift 2 ;;
         --models) MODELS="$2"; shift 2 ;;
+        --skip-seed) SKIP_SEED=1; shift ;;
         -h|--help)
             echo "usage: mirror-models.sh --bucket NAME [--region us-sea] [--prefix hf-cache] [--models a,b,c]"
             echo "  Seeds an Object Storage model mirror and writes model-mirror.conf for deploy.sh."
@@ -62,13 +66,15 @@ fi
 
 if [[ -z "${LINODE_CLI_TOKEN:-}" ]]; then export LINODE_CLI_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}"; fi
 [[ -n "${LINODE_CLI_TOKEN:-}" ]] || { echo "ERROR: set TF_VAR_token or LINODE_TOKEN." >&2; exit 1; }
-command -v aws     >/dev/null 2>&1 || { echo "ERROR: aws CLI not found (needed for the bulk upload). Install awscli." >&2; exit 1; }
 command -v "$PY" >/dev/null 2>&1 || { echo "ERROR: python not found (${PY})." >&2; exit 1; }
-# Ensure huggingface_hub (the download dep); install it into the .venv if missing.
-if ! "$PY" -c 'import huggingface_hub' >/dev/null 2>&1; then
-    echo "  huggingface_hub not found in ${PY} — installing it ..." >&2
-    "$PY" -m pip install -q huggingface_hub >&2 \
-        || { echo "ERROR: could not install huggingface_hub. Run: ${PY} -m pip install huggingface_hub" >&2; exit 1; }
+# aws CLI + huggingface_hub are only needed to SEED (download+upload), not to refresh the conf.
+if [[ "$SKIP_SEED" -eq 0 ]]; then
+    command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI not found (needed for the bulk upload). Install awscli." >&2; exit 1; }
+    if ! "$PY" -c 'import huggingface_hub' >/dev/null 2>&1; then
+        echo "  huggingface_hub not found in ${PY} — installing it ..." >&2
+        "$PY" -m pip install -q huggingface_hub >&2 \
+            || { echo "ERROR: could not install huggingface_hub. Run: ${PY} -m pip install huggingface_hub" >&2; exit 1; }
+    fi
 fi
 
 # Resolve the OS region id (us-sea) + cluster id (us-sea-1) -> endpoint (same as
@@ -135,15 +141,17 @@ except Exception:
     print("", "")
 PY
 }
-read -r AK_RW SK_RW < <(mint_key "${BUCKET}-rw" read_write)
+# Pods only ever need the read-only key.
 read -r AK_RO SK_RO < <(mint_key "${BUCKET}-ro" read_only)
-[[ -n "$AK_RW" && -n "$SK_RW" ]] || { echo "ERROR: could not mint read_write key." >&2; exit 1; }
 [[ -n "$AK_RO" && -n "$SK_RO" ]] || { echo "ERROR: could not mint read_only key." >&2; exit 1; }
 
-# Download the models locally into a temp HF cache, then sync that tree to the bucket.
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-echo "  downloading models: $MODELS"
-MODELS="$MODELS" CACHE="$TMP" "$PY" - <<'PY'
+if [[ "$SKIP_SEED" -eq 0 ]]; then
+    # Mint a read_write key, download the models locally (HF cache layout), sync the tree up.
+    read -r AK_RW SK_RW < <(mint_key "${BUCKET}-rw" read_write)
+    [[ -n "$AK_RW" && -n "$SK_RW" ]] || { echo "ERROR: could not mint read_write key." >&2; exit 1; }
+    TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+    echo "  downloading models: $MODELS"
+    MODELS="$MODELS" CACHE="$TMP" "$PY" - <<'PY'
 import os
 from huggingface_hub import snapshot_download
 for m in os.environ["MODELS"].split(","):
@@ -151,14 +159,16 @@ for m in os.environ["MODELS"].split(","):
     if m:
         print("  >>", m); snapshot_download(m, cache_dir=os.environ["CACHE"])
 PY
-
-echo "  uploading to s3://${BUCKET}/${PREFIX}/ ..."
-AWS_ACCESS_KEY_ID="$AK_RW" AWS_SECRET_ACCESS_KEY="$SK_RW" AWS_DEFAULT_REGION="$OBJ_REGION" \
-    aws s3 sync "$TMP" "s3://${BUCKET}/${PREFIX}" --endpoint-url "$ENDPOINT" --only-show-errors
-echo "  upload complete"
+    echo "  uploading to s3://${BUCKET}/${PREFIX}/ ..."
+    AWS_ACCESS_KEY_ID="$AK_RW" AWS_SECRET_ACCESS_KEY="$SK_RW" AWS_DEFAULT_REGION="$OBJ_REGION" \
+        aws s3 sync "$TMP" "s3://${BUCKET}/${PREFIX}" --endpoint-url "$ENDPOINT" --only-show-errors
+    echo "  upload complete"
+else
+    echo "  --skip-seed: bucket assumed already seeded; refreshed read-only key + conf only"
+fi
 
 # Write the auto-pickup conf (read_only key for pods). Gitignored; holds a secret → 0600.
-mkdir -p "$GENERATED"
+mkdir -p "$(dirname "$CONF")"
 ( umask 077; cat > "$CONF" <<EOF
 # Generated by mirror-models.sh — do not commit. Auto-sourced by deploy.sh.
 MODEL_MIRROR_BUCKET="${BUCKET}"

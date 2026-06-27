@@ -5,6 +5,10 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAKES_DIR="${REPO_ROOT}/tests/fakes"
 
+# Keep deploy.sh tests hermetic: don't let an operator's real model-mirror.conf (written
+# by `make mirror-models`) leak into preset/component assertions. /dev/null isn't a -f file.
+export MODEL_MIRROR_CONF="${MODEL_MIRROR_CONF:-/dev/null}"
+
 # Prepend the fakes to PATH so `linode-cli`/`curl` resolve to the shims.
 use_fakes() {
   export PATH="${FAKES_DIR}:${PATH}"
