@@ -47,6 +47,7 @@ MODEL_NAMES=""
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-}"
 VLLM_HOST="${VLLM_HOST:-http://vllm:8000/v1}"
 CONTENT_REPO="${CONTENT_REPO:-}"
+CONTENT_REF="${CONTENT_REF:-}"
 # Key students' OpenAI client sends as `Authorization: Bearer`. "not-needed" is the
 # harmless default when the endpoint has no auth; set to the real key when the
 # agentgateway enforces apiKeyAuthentication.
@@ -79,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --embedding-model) EMBEDDING_MODEL="$2"; shift 2 ;;
         --vllm-host) VLLM_HOST="$2"; shift 2 ;;
         --content-repo) CONTENT_REPO="$2"; shift 2 ;;
+        --content-ref) CONTENT_REF="$2"; shift 2 ;;
         --api-key) VLLM_API_KEY="$2"; shift 2 ;;
         --workspace-type) WORKSPACE_TYPE="$2"; shift 2 ;;
         --cluster-access) CLUSTER_ACCESS="$2"; shift 2 ;;
@@ -99,6 +101,7 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --embedding-model EMBEDDING_MODEL_ID env (multi-model gateway; "" → no embedding env)
   --vllm-host       VLLM_HOST env stamped into each workspace (default: http://vllm:8000/v1)
   --content-repo    CONTENT_REPO env (git repo cloned at pod startup; "" → default)
+  --content-ref     CONTENT_REF env (branch/tag/SHA to fetch; "" → startup default main)
   --api-key         VLLM_API_KEY env (sent as Bearer to the gateway; "not-needed" if no auth)
   --workspace-type  Editor: code-server (default) | jupyter (sets WORKSPACE_TYPE env)
   --cluster-access  none (default) | scoped — per-student namespace + scoped kubeconfig mount
@@ -364,7 +367,8 @@ EOF
         "${TEMPLATE}" \
       | awk -v wt="${WORKSPACE_TYPE}" -v ca="${CLUSTER_ACCESS}" -v kc="${KCFG_SECRET}" \
             -v os="${OBJECT_STORAGE}" -v osname="ws-${PADDED}-object-storage" \
-            -v vh="${VLLM_HOST}" -v md="${MODEL}" -v em="${EMBEDDING_MODEL}" '
+            -v vh="${VLLM_HOST}" -v md="${MODEL}" -v em="${EMBEDDING_MODEL}" \
+            -v cr="${CONTENT_REF}" '
           /__OBJECT_STORAGE_ENVFROM__/ {
             # Default (object_storage=none): drop the sentinel (byte-identical output).
             # managed: pull the per-student object-storage Secret in as envFrom (optional
@@ -396,6 +400,13 @@ EOF
               print "          value: \"" vh "\""
               print "        - name: VLLM_MODEL_ID"
               print "          value: \"" md "\""
+            }
+            next
+          }
+          /__CONTENT_REF_ENV__/ {
+            if (cr != "") {
+              print "        - name: CONTENT_REF"
+              print "          value: \"" cr "\""
             }
             next
           }
@@ -556,6 +567,14 @@ EOF
               value: "${MODEL_NAMES}"
             - name: CONTENT_REPO
               value: "${CONTENT_REPO}"
+EOF
+            if [[ -n "${CONTENT_REF}" ]]; then
+                cat >> "${MANIFESTS_TMP}" << EOF
+            - name: CONTENT_REF
+              value: "${CONTENT_REF}"
+EOF
+            fi
+            cat >> "${MANIFESTS_TMP}" << EOF
             - name: VLLM_API_KEY
               value: "${VLLM_API_KEY}"
             # OpenAI-client names the agent's settings.py reads (provider default is

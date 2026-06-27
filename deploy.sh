@@ -45,6 +45,7 @@ MODEL=""
 MODELS=""
 MULTI_MODEL=0
 CONTENT_REPO=""
+CONTENT_REF=""
 GATEWAY_API_KEY=""
 DOMAIN=""
 REGION=""
@@ -222,7 +223,7 @@ load_config() {
 import sys, re
 keys = {
  "students":"STUDENTS","model":"MODEL","models":"MODELS",
- "content_repo":"CONTENT_REPO","domain":"DOMAIN",
+ "content_repo":"CONTENT_REPO","content_ref":"CONTENT_REF","domain":"DOMAIN",
  "region":"REGION","gpu_node_type":"GPU_NODE_TYPE","gpu_node_count":"GPU_NODE_COUNT",
  "tensor_parallel_size":"TP","cpu_node_type":"CPU_NODE_TYPE","cpu_node_count":"CPU_NODE_COUNT",
  "label":"LABEL","k8s_version":"K8S_VERSION","subdomain_prefix":"SUBDOMAIN_PREFIX",
@@ -265,6 +266,7 @@ while [[ $# -gt 0 ]]; do
         --students)          STUDENTS="$2"; shift 2 ;;
         --model|--models)    MODELS="$2"; shift 2 ;;
         --content-repo)      CONTENT_REPO="$2"; shift 2 ;;
+        --content-ref)       CONTENT_REF="$2"; shift 2 ;;
         --domain)            DOMAIN="$2"; shift 2 ;;
         --region)            REGION="$2"; shift 2 ;;
         --gpu-node-type)     GPU_NODE_TYPE="$2"; shift 2 ;;
@@ -410,7 +412,7 @@ if interactive; then
     if [[ -n "$PRESET" ]]; then
         apply_preset "$PRESET"
         ok "pre-set: ${PRESET}"
-    elif [[ -n "${MODEL}${MODELS}${CONTENT_REPO}${EDITOR}${INFERENCE}${CLUSTER_ACCESS}${OBJECT_STORAGE}${AGENT_DEPLOY}" ]]; then
+    elif [[ -n "${MODEL}${MODELS}${CONTENT_REPO}${CONTENT_REF}${EDITOR}${INFERENCE}${CLUSTER_ACCESS}${OBJECT_STORAGE}${AGENT_DEPLOY}" ]]; then
         ok "composition pre-set by flags/config"
     else
         printf '%b\n' "        ${DIM}A workshop bundles its content, editor, model, and components.${RESET}"
@@ -493,7 +495,7 @@ if interactive; then
     # -- Step 5: Workshop content --
     if [[ -n "$CONTENT_REPO" ]]; then
         step_header 5 $TOTAL_STEPS "Workshop content"
-        ok "pre-set: ${CONTENT_REPO}"
+        ok "pre-set: ${CONTENT_REPO}${CONTENT_REF:+#${CONTENT_REF}}"
     elif [[ -n "$PRESET" && "$PRESET" != custom ]]; then
         # A named preset chose its content (blank → that workshop's default repo).
         step_header 5 $TOTAL_STEPS "Workshop content"
@@ -764,7 +766,7 @@ if [[ $MULTI_MODEL -eq 0 ]]; then
     printf "  ${DIM}%-14s${RESET} %s\n" "Name:"       "$LABEL"
     printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
     printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
-    printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}${CONTENT_REF:+#${CONTENT_REF}}"
     # Inference line tracks the component: shared-vllm keeps today's exact text.
     if [[ "$INFERENCE" == "external" ]]; then
         printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "external — ${INFERENCE_ENDPOINT}"
@@ -786,7 +788,7 @@ else
     printf "  ${DIM}%-14s${RESET} %s\n" "Name:"       "$LABEL"
     printf "  ${DIM}%-14s${RESET} %s\n" "Region:"     "$REGION"
     printf "  ${DIM}%-14s${RESET} %s\n" "TLS/DNS:"    "$DOMAIN_MODE"
-    printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Content:"    "${CONTENT_REPO:-ai-agents-workshop (default)}${CONTENT_REF:+#${CONTENT_REF}}"
     printf "  ${DIM}%-14s${RESET} %s\n" "Routing:"    "agentgateway → ${MODELS}"
     printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
     printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
@@ -853,6 +855,7 @@ if interactive; then
                 exec "$0" deploy --students "$STUDENTS" --model "$MODELS" \
                      --label "$LABEL" --domain "$DOMAIN" --region "$REGION" \
                      ${CONTENT_REPO:+--content-repo "$CONTENT_REPO"} \
+                     ${CONTENT_REF:+--content-ref "$CONTENT_REF"} \
                      --editor "$EDITOR" --inference "$INFERENCE" \
                      --gpus-per-student "$GPUS_PER_STUDENT" --gpu-sharing "$GPU_SHARING" \
                      --gpu-timeslicing-replicas "$GPU_TIMESLICING_REPLICAS" \
@@ -1050,6 +1053,7 @@ max_model_len: ${MAX_MODEL_LEN}
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 content_repo: "${CONTENT_REPO}"
+content_ref: "${CONTENT_REF}"
 ${COMPONENTS_YAML}
 hf_token: ""
 vllm_extra_args:
@@ -1091,6 +1095,7 @@ gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 vllm_host: http://agentgateway:8080/v1
 content_repo: "${CONTENT_REPO}"
+content_ref: "${CONTENT_REF}"
 gateway_api_key: "${GATEWAY_API_KEY}"
 ${COMPONENTS_YAML}
 hf_token: ""
@@ -1120,6 +1125,7 @@ GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
     --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY"
     --object-storage "$OBJECT_STORAGE")
+[[ -n "$CONTENT_REF" ]] && GEN_PODS_ARGS+=(--content-ref "$CONTENT_REF")
 # An embedding model rides the gateway alongside the chat model: workspaces get its id
 # as EMBEDDING_MODEL_ID and EMBEDDING_BASE_URL=VLLM_HOST (the same gateway) for RAG.
 [[ -n "$EMBEDDING_MODEL" ]] && GEN_PODS_ARGS+=(--embedding-model "$EMBEDDING_MODEL")

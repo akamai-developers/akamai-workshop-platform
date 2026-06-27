@@ -126,8 +126,18 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -q 'name: VLLM_BASE_URL' "${OUT}/workspace-manifests.yaml"
   ! grep -q 'name: EMBEDDING_BASE_URL' "${OUT}/workspace-manifests.yaml"
+  ! grep -q 'name: CONTENT_REF' "${OUT}/workspace-manifests.yaml"
   # and no leftover awk sentinels
   ! grep -qE '__[A-Z_]+__' "${OUT}/workspace-manifests.yaml"
+}
+
+@test "content ref wires CONTENT_REF into workspace env only when set" {
+  OUTPUT_DIR="${OUT}" run "${GENPODS}" -n 1 --host fixed.example \
+    --content-repo https://github.com/akamai-developers/akamai-workshop-ai-inference.git \
+    --content-ref feat/modules-5-8-performance-arc
+  [ "$status" -eq 0 ]
+  grep -q 'name: CONTENT_REF' "${OUT}/workspace-manifests.yaml"
+  grep -q 'value: "feat/modules-5-8-performance-arc"' "${OUT}/workspace-manifests.yaml"
 }
 
 @test "an embedding model wires EMBEDDING_BASE_URL / EMBEDDING_MODEL_ID" {

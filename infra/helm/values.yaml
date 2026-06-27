@@ -78,6 +78,7 @@ gateway_api_key: ""
 workspace_image: ghcr.io/akamai-developers/ai-agents-workspace:latest
 vllm_host: http://vllm:8000/v1
 content_repo: ""   # "" → default ai-agents-workshop (resolved by startup.sh)
+content_ref: ""    # "" → startup.sh default (main); set to clone a branch/tag/SHA
 
 # --- Component catalog (PLAN.md) ---
 # A workshop is a *composition* of these per-student components, selected once per

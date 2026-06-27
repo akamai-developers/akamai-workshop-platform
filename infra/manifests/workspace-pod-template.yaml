@@ -45,6 +45,7 @@ __WORKSPACE_TYPE_ENV__
           value: "__MODEL_NAMES__"
         - name: CONTENT_REPO
           value: "__CONTENT_REPO__"
+__CONTENT_REF_ENV__
         - name: VLLM_API_KEY
           value: "__VLLM_API_KEY__"
 __EDITOR_ENV_ALIASES__
