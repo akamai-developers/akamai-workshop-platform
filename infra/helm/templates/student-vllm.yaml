@@ -89,11 +89,23 @@ spec:
           args:
             - |
               set -eu
+              export HOME=/tmp   # aws-cli writes ~/.aws; /root isn't writable in this image
+              # Many pods sync at once → Object Storage throttles (SlowDown). Adaptive retry
+              # (env below) + low per-pod concurrency + a resumable retry loop converge the
+              # herd: aws s3 sync skips already-downloaded files, so each pass makes progress
+              # and the variable backoff de-synchronizes the pods.
+              aws configure set default.s3.max_concurrent_requests 3 || true
               SRC="s3://{{ $root.Values.model_mirror_bucket }}/{{ $root.Values.model_mirror_prefix }}"
               echo "Syncing $SRC -> {{ $root.Values.download_dir }}"
-              aws s3 sync "$SRC" "{{ $root.Values.download_dir }}" \
-                --endpoint-url "{{ $root.Values.model_mirror_endpoint }}" --only-show-errors
-              echo "mirror sync complete"
+              for attempt in $(seq 1 10); do
+                if aws s3 sync "$SRC" "{{ $root.Values.download_dir }}" \
+                     --endpoint-url "{{ $root.Values.model_mirror_endpoint }}" --only-show-errors; then
+                  echo "mirror sync complete (attempt $attempt)"; exit 0
+                fi
+                echo "sync attempt $attempt throttled; backing off $((attempt * 15))s..."
+                sleep $((attempt * 15))
+              done
+              echo "mirror sync FAILED after 10 attempts" >&2; exit 1
           envFrom:
             - secretRef:
                 name: model-mirror-s3
@@ -105,6 +117,12 @@ spec:
               value: "when_required"
             - name: AWS_RESPONSE_CHECKSUM_VALIDATION
               value: "when_required"
+            # Many simultaneous syncs throttle Object Storage; adaptive mode rate-limits
+            # the client and backs off on SlowDown, then keeps retrying.
+            - name: AWS_MAX_ATTEMPTS
+              value: "20"
+            - name: AWS_RETRY_MODE
+              value: "adaptive"
           volumeMounts:
             - name: model-cache
               mountPath: {{ $root.Values.download_dir }}

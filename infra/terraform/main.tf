@@ -51,10 +51,26 @@ locals {
         label = "gpu"
       }
   } : {})
+
+  # LKE caps a single node pool at 100 nodes ([count] Must be 1-100). Split any GPU pool
+  # with count > 100 into ceil(count/100) sub-pools (<=100 each) that SHARE the same `pool`
+  # node label, so the per-student vLLM nodeSelector (pool=<label>) still schedules across
+  # all of them. <=100 stays a single pool, so the default render is unchanged.
+  _max_nodes_per_pool = 100
+  gpu_node_pools = merge([
+    for label, p in local.effective_gpu_pools : {
+      for i in range(ceil(p.count / local._max_nodes_per_pool)) :
+      "${label}-${i}" => {
+        type  = p.type
+        label = p.label
+        count = (i + 1) * local._max_nodes_per_pool <= p.count ? local._max_nodes_per_pool : p.count - i * local._max_nodes_per_pool
+      }
+    }
+  ]...)
 }
 
 resource "linode_lke_node_pool" "gpu" {
-  for_each   = local.effective_gpu_pools
+  for_each   = local.gpu_node_pools
   cluster_id = linode_lke_cluster.workshop.id
   type       = each.value.type
   node_count = each.value.count

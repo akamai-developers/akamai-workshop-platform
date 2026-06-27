@@ -159,6 +159,7 @@ the original platform.
 | `inference` | `shared-vllm` \| `dedicated-vllm` \| `external` | Where the model comes from. `dedicated-vllm` requires `cluster_access: scoped`; `external` requires `--inference-endpoint <url>` (optional `--inference-api-key`) |
 | `gpus_per_student` | `1` | GPUs for `dedicated-vllm` (2 reserved for v2) |
 | `predownload_models` | _(empty)_ | `dedicated-vllm` only: comma-separated models pre-pulled into each student's PVC so switching the served model (kubectl patch of `--model`) is a fast restart-from-cache, not a re-download |
+| `model_mirror_bucket` | _(empty)_ | `dedicated-vllm` only: sync models from an in-region Object Storage mirror (seeded by `make mirror-models`) instead of Hugging Face — avoids HF rate-limiting at large scale. Auto-detected from `infra/model-mirror.conf` |
 | `gpu_sharing` | `none` \| `timeslicing` | NVIDIA time-slicing so two vLLMs share one card (the [two-models lab](infra/docs/gpu-sharing.md)); needs `dedicated-vllm` |
 | `gpu_timeslicing_replicas` | `2` | Logical GPUs advertised per physical card when `gpu_sharing: timeslicing` (must be >= 2) |
 | `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |
@@ -200,6 +201,12 @@ When `cluster_access: scoped` or `object_storage: managed` is set, each printed 
 also notes the student's namespace and that their kubeconfig / bucket is pre-wired (no secret
 material on the card). See `config.example.yaml` for the full catalog and [`PLAN.md`](PLAN.md)
 for the design.
+
+### Large classes & operations
+
+- **Beyond 100 students.** LKE caps a single node pool at 100 nodes; the GPU pool is automatically split into ≤100-node pools that share the `pool=gpu` label, so a 200-student `dedicated-vllm` class provisions in one cluster.
+- **Model mirror (avoid Hugging Face throttling).** At large scale, every per-student vLLM pulling from huggingface.co at once gets rate-limited (`SlowDown`). Seed an in-region Object Storage mirror once — `make mirror-models ARGS="--bucket <globally-unique-name> --region <region>"` — and `make deploy` auto-uses it (pods `aws s3 sync` from the bucket with adaptive-retry backoff). See [`infra/docs/ai-inference-workshop.md`](infra/docs/ai-inference-workshop.md).
+- **Refresh content on running pods.** After pushing to the content repo, `make refresh-content` pulls the latest into every running workspace — no redeploy, no pod recreation.
 
 ## Cost
 
