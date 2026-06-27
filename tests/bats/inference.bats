@@ -44,6 +44,21 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
   [[ "$output" != *"--gpu-memory-utilization=0.4"* ]]
 }
 
+@test "predownload_models adds a per-student pre-download initContainer" {
+  run helm template "${HELM_DIR}" --set inference=dedicated-vllm --set cluster_access=scoped --set student_count=2 \
+      --set predownload_models='Qwen/Qwen3-0.6B\,RedHatAI/Qwen3-4B-FP8-dynamic'
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'name: predownload-models' <<<"$output")" -eq 2 ]
+  [[ "$output" == *'Qwen/Qwen3-0.6B,RedHatAI/Qwen3-4B-FP8-dynamic'* ]]
+  [[ "$output" == *"snapshot_download"* ]]
+}
+
+@test "no pre-download initContainer when predownload_models is empty (default)" {
+  run helm template "${HELM_DIR}" --set inference=dedicated-vllm --set cluster_access=scoped --set student_count=2
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"predownload-models"* ]]
+}
+
 @test "external renders no platform vLLM at all" {
   run helm template "${HELM_DIR}" --set inference=external --set cluster_access=scoped --set student_count=2
   [ "$status" -eq 0 ]

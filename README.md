@@ -158,6 +158,7 @@ the original platform.
 | `editor` | `code-server` \| `jupyter` | The workspace UI |
 | `inference` | `shared-vllm` \| `dedicated-vllm` \| `external` | Where the model comes from. `dedicated-vllm` requires `cluster_access: scoped`; `external` requires `--inference-endpoint <url>` (optional `--inference-api-key`) |
 | `gpus_per_student` | `1` | GPUs for `dedicated-vllm` (2 reserved for v2) |
+| `predownload_models` | _(empty)_ | `dedicated-vllm` only: comma-separated models pre-pulled into each student's PVC so switching the served model (kubectl patch of `--model`) is a fast restart-from-cache, not a re-download |
 | `gpu_sharing` | `none` \| `timeslicing` | NVIDIA time-slicing so two vLLMs share one card (the [two-models lab](infra/docs/gpu-sharing.md)); needs `dedicated-vllm` |
 | `gpu_timeslicing_replicas` | `2` | Logical GPUs advertised per physical card when `gpu_sharing: timeslicing` (must be >= 2) |
 | `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |

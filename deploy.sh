@@ -71,6 +71,7 @@ GPU_MEMORY_UTIL="0.9"
 EDITOR=""            # code-server (default) | jupyter
 INFERENCE=""         # shared-vllm (default) | dedicated-vllm | external
 GPUS_PER_STUDENT=""  # 1 (default); 2 reserved/v2
+PREDOWNLOAD_MODELS=""  # dedicated-vllm: comma-separated models to pre-cache in each PVC
 GPU_SHARING=""       # none (default) | timeslicing; mps reserved/v2
 GPU_TIMESLICING_REPLICAS=""  # logical GPUs/card when gpu_sharing=timeslicing (default 2)
 CLUSTER_ACCESS=""    # none (default) | scoped
@@ -224,6 +225,7 @@ keys = {
  # Component catalog (editor accepts the legacy alias workspace_type too).
  "editor":"EDITOR","workspace_type":"EDITOR","inference":"INFERENCE",
  "gpus_per_student":"GPUS_PER_STUDENT","gpu_sharing":"GPU_SHARING",
+ "predownload_models":"PREDOWNLOAD_MODELS",
  "gpu_timeslicing_replicas":"GPU_TIMESLICING_REPLICAS",
  "cluster_access":"CLUSTER_ACCESS",
  "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
@@ -273,6 +275,7 @@ while [[ $# -gt 0 ]]; do
         --editor|--workspace-type) EDITOR="$2"; shift 2 ;;
         --inference)         INFERENCE="$2"; shift 2 ;;
         --gpus-per-student)  GPUS_PER_STUDENT="$2"; shift 2 ;;
+        --predownload-models) PREDOWNLOAD_MODELS="$2"; shift 2 ;;
         --gpu-sharing)       GPU_SHARING="$2"; shift 2 ;;
         --gpu-timeslicing-replicas) GPU_TIMESLICING_REPLICAS="$2"; shift 2 ;;
         --cluster-access)    CLUSTER_ACCESS="$2"; shift 2 ;;
@@ -330,9 +333,13 @@ apply_preset() {
             ;;
         own-inference|own-your-inference)
             # Each student runs + tunes their own dedicated vLLM from a notebook.
+            # Serves FP8-dynamic Qwen3-4B and pre-caches the 0.6B variants into the PVC so
+            # the in-notebook switch_model lab is a fast restart-from-cache (infra/docs/
+            # ai-inference-workshop.md). Explicit --model / --predownload-models still win.
             : "${CONTENT_REPO:=https://github.com/akamai-developers/akamai-workshop-ai-inference}"
             : "${EDITOR:=jupyter}"
-            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-4B"
+            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="RedHatAI/Qwen3-4B-FP8-dynamic"
+            : "${PREDOWNLOAD_MODELS:=RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B}"
             : "${INFERENCE:=dedicated-vllm}"
             : "${CLUSTER_ACCESS:=scoped}"
             : "${AGENT_DEPLOY:=plain}"
@@ -401,7 +408,7 @@ if interactive; then
         echo ""
         printf '%b\n' "        ${GREEN}${BOLD} 1${RESET}${GREEN}*${RESET} Solution Architect Agent  ${DIM}Jupyter · Qwen2.5-7B-Instruct · scoped + Object Storage + deploy${RESET}"
         printf '%b\n' "        ${CYAN}${BOLD} 2${RESET}  AI Agents                 ${DIM}code-server · Qwen3-8B-FP8 (the original platform default)${RESET}"
-        printf '%b\n' "        ${CYAN}${BOLD} 3${RESET}  Own-your-inference        ${DIM}Jupyter · per-student dedicated GPU to tune${RESET}"
+        printf '%b\n' "        ${CYAN}${BOLD} 3${RESET}  Own-your-inference        ${DIM}Jupyter · Qwen3-4B-FP8 (+0.6B cached) · dedicated GPU to tune${RESET}"
         printf '%b\n' "        ${CYAN}${BOLD} 4${RESET}  Custom                    ${DIM}choose model, content, and components yourself${RESET}"
         echo ""
         printf '%b\n' "        ${DIM}* = default${RESET}"
@@ -585,6 +592,7 @@ esac
 EDITOR="${EDITOR:-code-server}"
 INFERENCE="${INFERENCE:-shared-vllm}"
 GPUS_PER_STUDENT="${GPUS_PER_STUDENT:-1}"
+PREDOWNLOAD_MODELS="${PREDOWNLOAD_MODELS:-}"
 GPU_SHARING="${GPU_SHARING:-none}"
 GPU_TIMESLICING_REPLICAS="${GPU_TIMESLICING_REPLICAS:-2}"
 CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
@@ -777,6 +785,7 @@ if components_nondefault; then
     else
         printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"  "$INFERENCE"
     fi
+    [[ -n "$PREDOWNLOAD_MODELS" ]] && printf "  ${DIM}%-14s${RESET} %s\n" "Pre-cache:" "$PREDOWNLOAD_MODELS"
     if [[ "$GPU_SHARING" != "none" ]]; then
         printf "  ${DIM}%-14s${RESET} %s\n" "GPU sharing:" "${GPU_SHARING} (${GPU_TIMESLICING_REPLICAS} logical GPUs/card)"
     fi
@@ -979,6 +988,7 @@ COMPONENTS_YAML="$(cat <<EOF
 editor: ${EDITOR}
 inference: ${INFERENCE}
 gpus_per_student: ${GPUS_PER_STUDENT}
+predownload_models: "${PREDOWNLOAD_MODELS}"
 gpu_sharing: ${GPU_SHARING}
 gpu_timeslicing_replicas: ${GPU_TIMESLICING_REPLICAS}
 cluster_access: ${CLUSTER_ACCESS}

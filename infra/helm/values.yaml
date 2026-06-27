@@ -22,6 +22,11 @@ gpu_memory_util: 0.9
 # Less-often-changed vLLM knobs
 download_dir: /models
 model_cache_size: 50Gi
+# dedicated-vllm only: comma-separated models to pre-pull into each student's PVC at
+# pod start, so switching the served model later (kubectl patch of --model) is a fast
+# restart-from-cache, not a re-download. Empty (default) → vLLM just downloads the one
+# served model on first start. Keep model_cache_size large enough for every listed model.
+predownload_models: ""
 shm_size: 8Gi
 vllm_cpu_request: "4"
 vllm_mem_request: 16Gi

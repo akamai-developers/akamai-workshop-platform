@@ -71,6 +71,45 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
+      {{- if $root.Values.predownload_models }}
+      # Pre-pull every workshop model into the PVC so switching the served model later
+      # (kubectl patch of --model + the Recreate restart above) loads from cache instead
+      # of re-downloading. Idempotent: snapshot_download skips models already present.
+      initContainers:
+        - name: predownload-models
+          image: {{ $root.Values.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "Pre-downloading into $DL_DIR: $PREDOWNLOAD_MODELS"
+              for m in $(echo "$PREDOWNLOAD_MODELS" | tr ',' ' '); do
+                [ -z "$m" ] && continue
+                echo ">> $m"
+                M="$m" python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(os.environ['M'], cache_dir=os.environ['DL_DIR'])"
+              done
+              echo "pre-download complete"
+          env:
+            - name: PREDOWNLOAD_MODELS
+              value: {{ $root.Values.predownload_models | quote }}
+            - name: DL_DIR
+              value: {{ $root.Values.download_dir | quote }}
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-secrets
+                  key: HUGGING_FACE_HUB_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ $root.Values.download_dir }}
+      {{- end }}
       containers:
         - name: vllm
           image: {{ $root.Values.image }}

@@ -28,6 +28,7 @@ region:       us-ord                 # "" → wizard lists live GPU regions (see
 # editor:          code-server        # code-server (default) | jupyter
 # inference:       shared-vllm        # shared-vllm (default) | dedicated-vllm | external
 # gpus_per_student: 1                 # only for dedicated-vllm; 1 (default). 2 = reserved/v2
+# predownload_models: ""              # dedicated-vllm: comma-separated models pre-cached in each PVC for fast --model switching
 # gpu_sharing:     none               # none (default) | timeslicing (two vLLMs share one card; needs dedicated-vllm)
 # gpu_timeslicing_replicas: 2         # logical GPUs/card when gpu_sharing: timeslicing (>= 2)
 # cluster_access:  none               # none (default) | scoped (per-student ns + kubeconfig + NetworkPolicy)

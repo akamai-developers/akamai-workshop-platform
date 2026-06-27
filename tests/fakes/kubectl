@@ -42,6 +42,15 @@ case "$1" in
         echo "faketoken.${ns}"
         exit 0
         ;;
+    get)
+        # `get pods -A -l app=workspace -o jsonpath=...` → return a deterministic
+        # ns/pod list from FAKE_WORKSPACE_PODS (else nothing, like the old behavior).
+        joined="$*"
+        if [[ "$joined" == *"app=workspace"* && -n "${FAKE_WORKSPACE_PODS:-}" ]]; then
+            printf '%s' "${FAKE_WORKSPACE_PODS}"
+        fi
+        exit 0
+        ;;
     *)
         # Unhandled verbs succeed silently so scripts don't crash in tests.
         exit 0

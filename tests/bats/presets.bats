@@ -53,12 +53,20 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
   [[ "$output" != *"Components"* ]]
 }
 
-@test "preset own-inference is jupyter + dedicated-vllm + scoped" {
+@test "preset own-inference is jupyter + dedicated-vllm + scoped + FP8 model + pre-cache" {
   dry --preset own-inference --students 12
   [ "$status" -eq 0 ]
   [[ "$output" == *"dedicated-vllm"* ]]
   [[ "$output" == *"jupyter"* ]]
   [[ "$output" == *"scoped"* ]]
+  [[ "$output" == *"RedHatAI/Qwen3-4B-FP8-dynamic"* ]]
+  [[ "$output" == *"Pre-cache:"* ]]
+}
+
+@test "explicit --model overrides the own-inference preset's FP8 default" {
+  dry --preset own-inference --students 4 --model Qwen/Qwen3-0.6B
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Qwen/Qwen3-0.6B"* ]]
 }
 
 @test "explicit flags override a preset" {
