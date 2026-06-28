@@ -189,6 +189,34 @@ you are out of KV-cache memory: requests are queuing, not running. Lower `--max-
 both via the kubectl patches in section 2 — or scale horizontally. A healthy server keeps
 `kv_cache_usage_perc` below ~0.9 with `num_requests_waiting` at or near `0`.
 
+## Updating workshop content (latest, or a branch / PR)
+
+Workspaces clone the content repo once at pod start, so new commits or branches don't
+appear on running pods automatically. Two ways to update — no redeploy, no pod recreation:
+
+**All students** — roll the latest `main`, or a specific branch/PR head, into every workspace:
+
+```bash
+make refresh-content                                                # latest main
+make refresh-content ARGS="--ref feat/modules-5-8-performance-arc"  # a branch / PR head
+```
+
+`refresh-content` force-checks-out the ref in every `app=workspace` pod. (Use `--keep-edits`
+for a fast-forward `main` pull that preserves in-pod edits — but that can't switch branches.)
+
+**One student** — e.g., to test a branch on a single workspace before rolling it out:
+
+```bash
+KUBECONFIG=infra/kubeconfig.yaml kubectl -n workshop-sNN exec ws-NN -- sh -lc \
+  'cd /home/coder/workshop && git fetch --depth=1 origin <branch> && git checkout -f FETCH_HEAD'
+# student 204 onto the performance-arc PR:
+#   kubectl -n workshop-s204 exec ws-204 -- sh -lc \
+#     'cd /home/coder/workshop && git fetch --depth=1 origin feat/modules-5-8-performance-arc && git checkout -f FETCH_HEAD'
+```
+
+After either, students **refresh the Jupyter file browser** to see the new files. The content
+repo is public, so the in-pod fetch needs no token — just the operator kubeconfig.
+
 ## See also
 
 - [`gpu-sharing.md`](gpu-sharing.md) — running two models on one GPU (time-slicing lab)
