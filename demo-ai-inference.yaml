@@ -9,7 +9,7 @@ students: 2
 model: Qwen/Qwen3-4B
 
 # Pre-pull the baseline, FP8 target, and drafters into each student's PVC so switch_model() is a fast restart-from-cache.
-predownload_models: "Qwen/Qwen3-4B,RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B"
+predownload_models: "Qwen/Qwen3-4B,RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic"
 
 domain: ws.akamai-workshops.com
 region: us-ord

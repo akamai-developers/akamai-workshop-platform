@@ -344,13 +344,13 @@ apply_preset() {
             ;;
         own-inference|own-your-inference)
             # Each student runs + tunes their own dedicated vLLM from a notebook.
-            # Serves FP8-dynamic Qwen3-4B and pre-caches the 0.6B variants into the PVC so
-            # the in-notebook switch_model lab is a fast restart-from-cache (infra/docs/
-            # ai-inference-workshop.md). Explicit --model / --predownload-models still win.
+            # Starts from the BF16 Qwen3-4B baseline and pre-caches the FP8 target plus
+            # drafter so the notebook labs restart from cache, not Hugging Face.
+            # Explicit --model / --predownload-models still win.
             : "${CONTENT_REPO:=https://github.com/akamai-developers/akamai-workshop-ai-inference}"
             : "${EDITOR:=jupyter}"
-            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="RedHatAI/Qwen3-4B-FP8-dynamic"
-            : "${PREDOWNLOAD_MODELS:=RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B}"
+            [[ -z "$MODEL" && -z "$MODELS" ]] && MODELS="Qwen/Qwen3-4B"
+            : "${PREDOWNLOAD_MODELS:=Qwen/Qwen3-4B,RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic}"
             : "${INFERENCE:=dedicated-vllm}"
             : "${CLUSTER_ACCESS:=scoped}"
             : "${AGENT_DEPLOY:=plain}"
@@ -419,7 +419,7 @@ if interactive; then
         echo ""
         printf '%b\n' "        ${GREEN}${BOLD} 1${RESET}${GREEN}*${RESET} Solution Architect Agent  ${DIM}Jupyter · Qwen2.5-7B-Instruct · scoped + Object Storage + deploy${RESET}"
         printf '%b\n' "        ${CYAN}${BOLD} 2${RESET}  AI Agents                 ${DIM}code-server · Qwen3-8B-FP8 (the original platform default)${RESET}"
-        printf '%b\n' "        ${CYAN}${BOLD} 3${RESET}  Own-your-inference        ${DIM}Jupyter · Qwen3-4B-FP8 (+0.6B cached) · dedicated GPU to tune${RESET}"
+        printf '%b\n' "        ${CYAN}${BOLD} 3${RESET}  Own-your-inference        ${DIM}Jupyter · Qwen3-4B baseline (+FP8/drafter cached) · dedicated GPU to tune${RESET}"
         printf '%b\n' "        ${CYAN}${BOLD} 4${RESET}  Custom                    ${DIM}choose model, content, and components yourself${RESET}"
         echo ""
         printf '%b\n' "        ${DIM}* = default${RESET}"
@@ -1050,7 +1050,9 @@ model: ${MODEL}
 replicas: ${REPLICAS}
 tensor_parallel_size: ${TP}
 max_model_len: ${MAX_MODEL_LEN}
-dedicated_max_model_len: ${MAX_MODEL_LEN}
+dedicated_gpu_memory_util: 0.6
+dedicated_max_model_len: 8192
+dedicated_max_num_seqs: 32
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 content_repo: "${CONTENT_REPO}"
@@ -1092,7 +1094,9 @@ multi_model: true
 models:
 ${MODELS_YAML}
 max_model_len: ${MAX_MODEL_LEN}
-dedicated_max_model_len: ${MAX_MODEL_LEN}
+dedicated_gpu_memory_util: 0.6
+dedicated_max_model_len: 8192
+dedicated_max_num_seqs: 32
 gpu_memory_util: ${GPU_MEMORY_UTIL}
 workspace_image: ${WORKSPACE_IMAGE}
 vllm_host: http://agentgateway:8080/v1

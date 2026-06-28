@@ -30,8 +30,9 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
   [ "$(grep -c '^kind: Deployment' <<<"$output")" -eq 3 ]
   [ "$(grep -c 'kind: PersistentVolumeClaim' <<<"$output")" -eq 3 ]
   # deliberately under-tuned, pinned to a GPU node, 1 GPU each
-  [[ "$output" == *"--gpu-memory-utilization=0.4"* ]]
-  [[ "$output" == *"--max-model-len=2048"* ]]
+  [[ "$output" == *"--gpu-memory-utilization=0.6"* ]]
+  [[ "$output" == *"--max-model-len=8192"* ]]
+  [[ "$output" == *"--max-num-seqs=32"* ]]
   [[ "$output" == *"pool: gpu"* ]]
   [[ "$output" == *"nvidia.com/gpu: 1"* ]]
   # Service named vllm so the in-namespace workspace short name resolves
@@ -41,15 +42,15 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
 @test "dedicated-vllm renders nothing without scoped (needs per-student namespaces)" {
   run helm template "${HELM_DIR}" --set inference=dedicated-vllm --set student_count=2
   [ "$status" -eq 0 ]
-  [[ "$output" != *"--gpu-memory-utilization=0.4"* ]]
+  [[ "$output" != *"--gpu-memory-utilization=0.6"* ]]
 }
 
 @test "predownload_models adds a per-student pre-download initContainer" {
   run helm template "${HELM_DIR}" --set inference=dedicated-vllm --set cluster_access=scoped --set student_count=2 \
-      --set predownload_models='Qwen/Qwen3-0.6B\,RedHatAI/Qwen3-4B-FP8-dynamic'
+      --set predownload_models='Qwen/Qwen3-4B\,RedHatAI/Qwen3-4B-FP8-dynamic\,RedHatAI/Qwen3-0.6B-FP8-dynamic'
   [ "$status" -eq 0 ]
   [ "$(grep -c 'name: predownload-models' <<<"$output")" -eq 2 ]
-  [[ "$output" == *'Qwen/Qwen3-0.6B,RedHatAI/Qwen3-4B-FP8-dynamic'* ]]
+  [[ "$output" == *'Qwen/Qwen3-4B,RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic'* ]]
   [[ "$output" == *"snapshot_download"* ]]
 }
 
