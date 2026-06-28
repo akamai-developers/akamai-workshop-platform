@@ -25,6 +25,6 @@ agent_deploy:     plain            # capstone: ship the tuned setup as a Deploym
 object_storage:   none
 
 # The per-student vLLM ships under-tuned on purpose (helm values
-# dedicated_gpu_memory_util: 0.6, dedicated_max_model_len: 8192,
+# dedicated_gpu_memory_util: 0.7, dedicated_max_model_len: 8192,
 # dedicated_max_num_seqs: 32). Raising the sequence cap, then testing memory
 # headroom, is part of the workshop.

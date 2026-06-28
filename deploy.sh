@@ -1050,7 +1050,7 @@ model: ${MODEL}
 replicas: ${REPLICAS}
 tensor_parallel_size: ${TP}
 max_model_len: ${MAX_MODEL_LEN}
-dedicated_gpu_memory_util: 0.6
+dedicated_gpu_memory_util: 0.7
 dedicated_max_model_len: 8192
 dedicated_max_num_seqs: 32
 gpu_memory_util: ${GPU_MEMORY_UTIL}
@@ -1094,7 +1094,7 @@ multi_model: true
 models:
 ${MODELS_YAML}
 max_model_len: ${MAX_MODEL_LEN}
-dedicated_gpu_memory_util: 0.6
+dedicated_gpu_memory_util: 0.7
 dedicated_max_model_len: 8192
 dedicated_max_num_seqs: 32
 gpu_memory_util: ${GPU_MEMORY_UTIL}

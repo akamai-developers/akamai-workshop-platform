@@ -30,7 +30,7 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
   [ "$(grep -c '^kind: Deployment' <<<"$output")" -eq 3 ]
   [ "$(grep -c 'kind: PersistentVolumeClaim' <<<"$output")" -eq 3 ]
   # deliberately under-tuned, pinned to a GPU node, 1 GPU each
-  [[ "$output" == *"--gpu-memory-utilization=0.6"* ]]
+  [[ "$output" == *"--gpu-memory-utilization=0.7"* ]]
   [[ "$output" == *"--max-model-len=8192"* ]]
   [[ "$output" == *"--max-num-seqs=32"* ]]
   [[ "$output" == *"pool: gpu"* ]]
@@ -42,7 +42,7 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
 @test "dedicated-vllm renders nothing without scoped (needs per-student namespaces)" {
   run helm template "${HELM_DIR}" --set inference=dedicated-vllm --set student_count=2
   [ "$status" -eq 0 ]
-  [[ "$output" != *"--gpu-memory-utilization=0.6"* ]]
+  [[ "$output" != *"--gpu-memory-utilization=0.7"* ]]
 }
 
 @test "predownload_models adds a per-student pre-download initContainer" {

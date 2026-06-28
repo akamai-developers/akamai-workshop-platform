@@ -3,7 +3,7 @@
 This is the student-facing guide for the AI inference classroom. Each student gets a
 Jupyter workspace, their **own namespace** (`workshop-sNN`), **one dedicated GPU**, and
 their **own vLLM** (Deployment `vllm`, reachable in-namespace at `http://vllm:8000`). The
-vLLM is deliberately **under-tuned** (`--gpu-memory-utilization=0.6`,
+vLLM is deliberately **under-tuned** (`--gpu-memory-utilization=0.7`,
 `--max-model-len=8192`, `--max-num-seqs=32`) — testing those knobs is part of the lab.
 
 Models you select with `--predownload-models` at deploy time are pre-pulled into each
@@ -99,7 +99,7 @@ resources. You run as `serviceaccount:workshop-sNN:student`.
 !kubectl patch deployment vllm --type=json \
   -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/5","value":"--max-num-seqs=128"}]'
 
-# optionally raise GPU memory utilization 0.6 -> 0.9 (more KV cache)
+# optionally raise GPU memory utilization 0.7 -> 0.9 (more KV cache)
 !kubectl patch deployment vllm --type=json \
   -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/3","value":"--gpu-memory-utilization=0.9"}]'
 

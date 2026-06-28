@@ -111,7 +111,7 @@ gpu_timeslicing_replicas: 2
 # dedicated-vllm only: the per-student vLLM is deliberately under-tuned so the
 # saturation/tuning lab has a clear hypothesis to test. Students raise the sequence
 # cap first, then optionally raise GPU memory utilization after measuring.
-dedicated_gpu_memory_util: 0.6
+dedicated_gpu_memory_util: 0.7
 dedicated_max_model_len: 8192
 dedicated_max_num_seqs: 32
 # The per-student vLLM runs on a SMALL single-GPU node (g2-gpu-rtx4000a1-s = 4 vCPU / 16 GB,
