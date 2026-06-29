@@ -53,20 +53,21 @@ dry() { run "${DEPLOY}" deploy --dry-run --domain none "$@"; }
   [[ "$output" != *"Components"* ]]
 }
 
-@test "preset own-inference is jupyter + dedicated-vllm + scoped + FP8 model + pre-cache" {
+@test "preset own-inference is jupyter + dedicated-vllm + scoped + BF16 baseline + pre-cache" {
   dry --preset own-inference --students 12
   [ "$status" -eq 0 ]
   [[ "$output" == *"dedicated-vllm"* ]]
   [[ "$output" == *"jupyter"* ]]
   [[ "$output" == *"scoped"* ]]
+  [[ "$output" == *"Qwen/Qwen3-4B"* ]]
   [[ "$output" == *"RedHatAI/Qwen3-4B-FP8-dynamic"* ]]
   [[ "$output" == *"Pre-cache:"* ]]
 }
 
-@test "explicit --model overrides the own-inference preset's FP8 default" {
-  dry --preset own-inference --students 4 --model Qwen/Qwen3-0.6B
+@test "explicit --model overrides the own-inference preset's baseline default" {
+  dry --preset own-inference --students 4 --model RedHatAI/Qwen3-4B-FP8-dynamic
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Qwen/Qwen3-0.6B"* ]]
+  [[ "$output" == *"RedHatAI/Qwen3-4B-FP8-dynamic"* ]]
 }
 
 @test "explicit flags override a preset" {
@@ -126,8 +127,18 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -q 'name: VLLM_BASE_URL' "${OUT}/workspace-manifests.yaml"
   ! grep -q 'name: EMBEDDING_BASE_URL' "${OUT}/workspace-manifests.yaml"
+  ! grep -q 'name: CONTENT_REF' "${OUT}/workspace-manifests.yaml"
   # and no leftover awk sentinels
   ! grep -qE '__[A-Z_]+__' "${OUT}/workspace-manifests.yaml"
+}
+
+@test "content ref wires CONTENT_REF into workspace env only when set" {
+  OUTPUT_DIR="${OUT}" run "${GENPODS}" -n 1 --host fixed.example \
+    --content-repo https://github.com/akamai-developers/akamai-workshop-ai-inference.git \
+    --content-ref feat/modules-5-8-performance-arc
+  [ "$status" -eq 0 ]
+  grep -q 'name: CONTENT_REF' "${OUT}/workspace-manifests.yaml"
+  grep -q 'value: "feat/modules-5-8-performance-arc"' "${OUT}/workspace-manifests.yaml"
 }
 
 @test "an embedding model wires EMBEDDING_BASE_URL / EMBEDDING_MODEL_ID" {

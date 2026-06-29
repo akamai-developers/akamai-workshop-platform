@@ -78,6 +78,7 @@ gateway_api_key: ""
 workspace_image: ghcr.io/akamai-developers/ai-agents-workspace:latest
 vllm_host: http://vllm:8000/v1
 content_repo: ""   # "" → default ai-agents-workshop (resolved by startup.sh)
+content_ref: ""    # "" → startup.sh default (main); set to clone a branch/tag/SHA
 
 # --- Component catalog (PLAN.md) ---
 # A workshop is a *composition* of these per-student components, selected once per
@@ -107,12 +108,12 @@ gpu_sharing: none
 # gpu_sharing=timeslicing only: logical GPUs advertised per physical card. 2 fits the
 #   two-models lab (each server at ~0.45 GPU-memory-util); raise for more co-tenant pods.
 gpu_timeslicing_replicas: 2
-# dedicated-vllm only: the per-student vLLM is DELIBERATELY under-tuned so the
-# saturate/optimize lab has something to fix. Students raise these via kubectl.
-# 0.7 (not lower): must still LOAD weights + minimal KV on a 20 GB card, else vLLM
-# crashes at startup ("no available memory for cache blocks"). Students raise toward 0.9.
+# dedicated-vllm only: the per-student vLLM is deliberately under-tuned so the
+# saturation/tuning lab has a clear hypothesis to test. Students raise the sequence
+# cap first, then optionally raise GPU memory utilization after measuring.
 dedicated_gpu_memory_util: 0.7
-dedicated_max_model_len: 2048
+dedicated_max_model_len: 8192
+dedicated_max_num_seqs: 32
 # The per-student vLLM runs on a SMALL single-GPU node (g2-gpu-rtx4000a1-s = 4 vCPU / 16 GB,
 # ~3.9 CPU / ~12.9 Gi allocatable after daemonsets). The shared vLLM's 4 CPU / 16 Gi requests
 # do NOT fit (pod stays Pending: Insufficient cpu/memory), so the dedicated path requests less —

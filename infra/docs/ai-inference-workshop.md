@@ -4,11 +4,12 @@ This is the student-facing guide for the AI inference classroom. Each student ge
 Jupyter workspace, their **own namespace** (`workshop-sNN`), **one dedicated GPU**, and
 their **own vLLM** (Deployment `vllm`, reachable in-namespace at `http://vllm:8000`). The
 vLLM is deliberately **under-tuned** (`--gpu-memory-utilization=0.7`,
-`--max-model-len=2048`) — raising those is part of the lab.
+`--max-model-len=8192`, `--max-num-seqs=32`) — testing those knobs is part of the lab.
 
 Models you select with `--predownload-models` at deploy time are pre-pulled into each
-student's PVC, so swapping the served model later is a fast restart-from-cache, not a
-re-download.
+student's PVC. The BF16 and FP8 4B models are served-model targets, so switching between
+them is a fast restart-from-cache. The 0.6B model is cached only for speculative decoding
+as a drafter.
 
 ## Deploy the classroom (operator)
 
@@ -18,20 +19,19 @@ export TF_VAR_token="$LINODE_TOKEN"
   --students 200 --editor jupyter \
   --inference dedicated-vllm --cluster-access scoped \
   --gpus-per-student 1 \
-  --model RedHatAI/Qwen3-4B-FP8-dynamic \
-  --predownload-models 'RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B' \
+  --model Qwen/Qwen3-4B \
+  --predownload-models 'Qwen/Qwen3-4B,RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic' \
   --domain "" --region us-ord
 ```
 
 `--inference dedicated-vllm` requires `--cluster-access scoped`. The model in `--model`
-is what each vLLM serves at startup; every model in `--predownload-models` is cached so
-students can switch between them. Keep `model_cache_size` (default `50Gi`) larger than the
-sum of the listed models — the three Qwen3 models above total ~10 GB.
+is what each vLLM serves at startup. Keep `model_cache_size` (default `50Gi`) larger than
+the sum of the listed models — the three Qwen3 models above total ~10 GB.
 
 Plan and price it first (creates nothing):
 
 ```bash
-make dry-run ARGS="--students 200 --model RedHatAI/Qwen3-4B-FP8-dynamic \
+make dry-run ARGS="--students 200 --model Qwen/Qwen3-4B \
   --inference dedicated-vllm --gpus-per-student 1 --editor jupyter"
 ```
 
@@ -42,8 +42,8 @@ hand a running server a different model name and have it hot-load. "Switching" m
 **restarting** the server with a new `--model`. Because the model is already in your PVC
 (pre-downloaded), the restart loads from cache in seconds instead of re-downloading.
 
-All three workshop models are Qwen3 "thinking" models, so the reasoning/tool-call parser
-flags stay correct as you switch between them.
+Both served-target workshop models are Qwen3 "thinking" models, so the reasoning/tool-call
+parser flags stay correct as you switch between them.
 
 **From a notebook** (helpers ship in the content repo at `common/vllm_admin.py`):
 
@@ -51,8 +51,8 @@ flags stay correct as you switch between them.
 from common.vllm_admin import switch_model, current_model, AVAILABLE_MODELS
 
 current_model()                              # what is loaded now
-AVAILABLE_MODELS                             # the pre-cached choices
-switch_model("Qwen/Qwen3-0.6B")             # patch --model, restart, wait for Ready
+AVAILABLE_MODELS                             # the pre-cached served-model choices
+switch_model("RedHatAI/Qwen3-4B-FP8-dynamic") # patch --model, restart, wait for Ready
 ```
 
 After a switch, pass the **new** model id in your OpenAI client calls:
@@ -60,7 +60,7 @@ After a switch, pass the **new** model id in your OpenAI client calls:
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://vllm:8000/v1", api_key="not-needed")
-client.chat.completions.create(model="Qwen/Qwen3-0.6B",
+client.chat.completions.create(model="RedHatAI/Qwen3-4B-FP8-dynamic",
     messages=[{"role": "user", "content": "hi"}], max_tokens=16)
 ```
 
@@ -69,7 +69,7 @@ notebook cell):
 
 ```bash
 !kubectl patch deployment vllm --type=json \
-  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/0","value":"--model=Qwen/Qwen3-0.6B"}]'
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/0","value":"--model=RedHatAI/Qwen3-4B-FP8-dynamic"}]'
 !kubectl rollout status deployment/vllm
 ```
 
@@ -95,19 +95,19 @@ resources. You run as `serviceaccount:workshop-sNN:student`.
 **Tune your vLLM** (the saturate/optimize lab — raise the under-tuned defaults):
 
 ```bash
-# raise GPU memory utilization 0.7 -> 0.9 (more KV cache = more concurrency)
+# raise the running sequence cap 32 -> 128 (more requests can run together)
+!kubectl patch deployment vllm --type=json \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/5","value":"--max-num-seqs=128"}]'
+
+# optionally raise GPU memory utilization 0.7 -> 0.9 (more KV cache)
 !kubectl patch deployment vllm --type=json \
   -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/3","value":"--gpu-memory-utilization=0.9"}]'
-
-# raise context length 2048 -> 8192
-!kubectl patch deployment vllm --type=json \
-  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/4","value":"--max-model-len=8192"}]'
 
 !kubectl rollout status deployment/vllm
 ```
 
 The arg order is `--model` (index 0), `--download-dir` (1), `--tensor-parallel-size` (2),
-`--gpu-memory-utilization` (3), `--max-model-len` (4). If a tune makes vLLM crash at
+`--gpu-memory-utilization` (3), `--max-model-len` (4), `--max-num-seqs` (5). If a tune makes vLLM crash at
 startup ("no available memory for cache blocks"), lower the value — that failure *is* the
 lesson.
 
