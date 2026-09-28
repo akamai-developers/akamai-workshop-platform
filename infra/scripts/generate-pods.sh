@@ -22,6 +22,7 @@ SECRETS="${OUTPUT_DIR}/workspace-secrets.yaml"
 MANIFESTS="${OUTPUT_DIR}/workspace-manifests.yaml"
 INGRESS="${OUTPUT_DIR}/ingress.yaml"
 CONFIGMAP="${OUTPUT_DIR}/workspace-startup-configmap.yaml"
+STUDENT_ACCESS_MANIFEST="${OUTPUT_DIR}/student-access.yaml"
 
 CSV_TMP="${CSV}.tmp"
 SECRETS_TMP="${SECRETS}.tmp"
@@ -67,6 +68,10 @@ AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
 # per-student Object Storage Secret (ws-NN-object-storage, provisioned by
 # provision-object-storage.sh) in as envFrom. Default emits NO envFrom (byte-identical).
 OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
+# Student entrypoint: portal (default) deploys the self-registration service;
+# cards keeps only the existing per-student access-card workflow.
+STUDENT_ACCESS="${STUDENT_ACCESS:-portal}"
+STUDENT_ACCESS_IMAGE="${STUDENT_ACCESS_IMAGE:-ghcr.io/muchobien/pocketbase:0.40.4@sha256:9390b7b63ce114dbab577be72e6ef75f718a19083866607fcbdd1b915632b943}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -86,6 +91,8 @@ while [[ $# -gt 0 ]]; do
         --cluster-access) CLUSTER_ACCESS="$2"; shift 2 ;;
         --agent-deploy) AGENT_DEPLOY="$2"; shift 2 ;;
         --object-storage) OBJECT_STORAGE="$2"; shift 2 ;;
+        --student-access) STUDENT_ACCESS="$2"; shift 2 ;;
+        --student-access-image) STUDENT_ACCESS_IMAGE="$2"; shift 2 ;;
         --rotate) ROTATE=1; shift ;;
         --shrink) SHRINK=1; shift ;;
         -h|--help)
@@ -107,6 +114,8 @@ Usage: $0 [-n COUNT] --host BASE_HOST [options]
   --cluster-access  none (default) | scoped — per-student namespace + scoped kubeconfig mount
   --agent-deploy    none (default) | plain — per-student agent Deployment+Service (needs scoped)
   --object-storage  none (default) | managed — wire per-student object-storage Secret as envFrom
+  --student-access  portal (default) | cards — self-registration portal or access cards only
+  --student-access-image  PocketBase image for portal mode (version+digest pinned by default)
   --rotate          Mint fresh passwords for every student. Required to change --host.
   --shrink          Allow N to be smaller than existing CSV; trimmed entries archived to .bak.
 EOF
@@ -129,6 +138,7 @@ MODEL_NAMES="${MODEL_NAMES:-$MODEL}"
 case "${CLUSTER_ACCESS}" in none|scoped) ;; *) echo "ERROR: --cluster-access must be 'none' or 'scoped' (got '${CLUSTER_ACCESS}')" >&2; exit 1 ;; esac
 case "${AGENT_DEPLOY}" in none|plain) ;; *) echo "ERROR: --agent-deploy must be 'none' or 'plain' (got '${AGENT_DEPLOY}')" >&2; exit 1 ;; esac
 case "${OBJECT_STORAGE}" in none|managed) ;; *) echo "ERROR: --object-storage must be 'none' or 'managed' (got '${OBJECT_STORAGE}')" >&2; exit 1 ;; esac
+case "${STUDENT_ACCESS}" in portal|cards) ;; *) echo "ERROR: --student-access must be 'portal' or 'cards' (got '${STUDENT_ACCESS}')" >&2; exit 1 ;; esac
 if [[ "${AGENT_DEPLOY}" != "none" && "${CLUSTER_ACCESS}" != "scoped" ]]; then
     echo "ERROR: --agent-deploy '${AGENT_DEPLOY}' requires --cluster-access scoped (the agent ships into the student namespace)." >&2
     exit 1
@@ -680,6 +690,22 @@ mv "${MANIFESTS_TMP}" "${MANIFESTS}"
 mv "${INGRESS_TMP}" "${INGRESS}"
 mv "${CONFIGMAP_TMP}" "${CONFIGMAP}"
 
+if [[ "${STUDENT_ACCESS}" == "portal" ]]; then
+    python3 "${SCRIPT_DIR}/generate-student-access.py" \
+        --csv "${CSV}" \
+        --output "${STUDENT_ACCESS_MANIFEST}" \
+        --host "${HOST}" \
+        --namespace "${NAMESPACE}" \
+        --tls-secret "${TLS_SECRET}" \
+        --image "${STUDENT_ACCESS_IMAGE}"
+else
+    # Avoid applying a stale local portal manifest when the operator explicitly
+    # selects cards-only mode for a new deployment.
+    rm -f "${STUDENT_ACCESS_MANIFEST}"
+    echo "NOTE: cards mode only removes the local portal manifest; it does not delete a live portal or its PVC."
+    echo "      Use deploy.sh to switch an existing classroom to cards-only mode."
+fi
+
 echo ""
 echo "=== Done: *.${HOST} ==="
 case "${MODE}" in
@@ -707,6 +733,7 @@ echo "  ${SECRETS}"
 echo "  ${MANIFESTS}"
 echo "  ${INGRESS}"
 echo "  ${CSV}"
+[[ "${STUDENT_ACCESS}" == "portal" ]] && echo "  ${STUDENT_ACCESS_MANIFEST}"
 echo ""
 echo "Deploy (the whole generated/ dir applies in dependency order):"
 echo "  kubectl apply -f ${OUTPUT_DIR}/"

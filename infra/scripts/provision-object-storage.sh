@@ -54,6 +54,8 @@ PREFIX="${PREFIX:-}"
 NAMESPACE="${NAMESPACE:-workshop}"
 CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
 TEARDOWN=0
+RESET_SLOT=""
+CONFIRM_RESET=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -63,6 +65,8 @@ while [[ $# -gt 0 ]]; do
         --namespace) NAMESPACE="$2"; shift 2 ;;
         --cluster-access) CLUSTER_ACCESS="$2"; shift 2 ;;
         --teardown) TEARDOWN=1; shift ;;
+        --reset-slot) RESET_SLOT="$2"; shift 2 ;;
+        --confirm-reset) CONFIRM_RESET=1; shift ;;
         -h|--help)
             cat <<EOF
 Usage: $0 [-n COUNT] --region REGION --prefix PREFIX [options]
@@ -72,6 +76,8 @@ Usage: $0 [-n COUNT] --region REGION --prefix PREFIX [options]
   --namespace       Base namespace for emitted Secrets (default: workshop)
   --cluster-access  none (default) | scoped — scoped puts each Secret in <namespace>-sNN
   --teardown        Revoke every key + empty/delete every bucket matching --prefix
+  --reset-slot      Empty one student's bucket and rotate only its scoped key
+  --confirm-reset   Required with --reset-slot; permanently deletes that slot's objects
 EOF
             exit 0
             ;;
@@ -210,7 +216,7 @@ try:
     data = json.loads(sys.argv[1])
 except Exception:
     data = []
-pat = re.compile(r'^' + re.escape(prefix) + r'-s\d{2}-key$')
+pat = re.compile(r'^' + re.escape(prefix) + r'-s\d{2}-key(?:-r[0-9a-f]{4})?$')
 for k in data:
     if pat.match(str(k.get("label", ""))):
         print(k.get("id", ""))
@@ -272,6 +278,65 @@ fi
 # ---------------------------------------------------------------------------
 resolve_region "${REGION}"
 ENDPOINT="$(endpoint_url)"
+
+# A used slot must lose its bucket data AND its old key before reassignment.
+# Keep the other students' rows, buckets, and keys untouched.
+if [[ -n "${RESET_SLOT}" ]]; then
+    [[ ${TEARDOWN} -eq 0 && ${CONFIRM_RESET} -eq 1 && "${RESET_SLOT}" =~ ^s[0-9]{2}$ ]] \
+        || { echo "ERROR: --reset-slot sNN requires --confirm-reset and cannot be combined with --teardown" >&2; exit 1; }
+    [[ -f "${CSV}" ]] || { echo "ERROR: ${CSV} is missing; refusing reset" >&2; exit 1; }
+    ROW="$(awk -F, -v slot="${RESET_SLOT}" '$1 == slot {print}' "${CSV}")"
+    [[ -n "${ROW}" ]] || { echo "ERROR: ${RESET_SLOT} is absent from ${CSV}" >&2; exit 1; }
+    IFS=, read -r _row_slot BUCKET OLD_KEY_ID OLD_AK OLD_SK <<<"${ROW}"
+    [[ "${BUCKET}" == "$(bucket_name "${RESET_SLOT#s}")" && -n "${OLD_KEY_ID}" && -n "${OLD_AK}" && -n "${OLD_SK}" ]] \
+        || { echo "ERROR: ${RESET_SLOT} storage state is incomplete or has an unexpected bucket" >&2; exit 1; }
+    ${S3_EMPTY} --endpoint "${ENDPOINT}" --region "${OBJ_REGION}" \
+        --bucket "${BUCKET}" --access-key "${OLD_AK}" --secret-key "${OLD_SK}" >/dev/null
+    RESET_LABEL="$(key_label "${RESET_SLOT#s}")-r$(openssl rand -hex 2)"
+    KEY_JSON="$("${LINODECLI}" object-storage keys-create \
+        --label "${RESET_LABEL}" --regions "${OBJ_REGION}" \
+        --bucket_access.region "${OBJ_REGION}" \
+        --bucket_access.bucket_name "${BUCKET}" \
+        --bucket_access.permissions read_write --json)"
+    read -r NEW_KEY_ID NEW_AK NEW_SK < <(python3 - "${KEY_JSON}" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+key = data[0] if isinstance(data, list) else data
+print(key.get("id", ""), key.get("access_key", ""), key.get("secret_key", ""))
+PY
+)
+    [[ -n "${NEW_KEY_ID}" && -n "${NEW_AK}" && -n "${NEW_SK}" ]] \
+        || { echo "ERROR: reset key creation returned incomplete credentials" >&2; exit 1; }
+    RESET_CSV_TMP="${CSV}.reset.tmp"
+    python3 - "${CSV}" "${RESET_CSV_TMP}" "${RESET_SLOT}" "${BUCKET}" "${NEW_KEY_ID}" "${NEW_AK}" "${NEW_SK}" <<'PY'
+import csv, os, sys
+source, target, slot, bucket, key_id, access, secret = sys.argv[1:]
+with open(source, newline="", encoding="utf-8") as handle:
+    rows = list(csv.DictReader(handle))
+for row in rows:
+    if row["student_number"] == slot:
+        row.update(bucket=bucket, key_id=key_id, access_key=access, secret_key=secret)
+with open(target, "w", newline="", encoding="utf-8") as handle:
+    writer = csv.DictWriter(handle, fieldnames=["student_number", "bucket", "key_id", "access_key", "secret_key"])
+    writer.writeheader()
+    writer.writerows(rows)
+os.chmod(target, 0o600)
+PY
+    if ! "${LINODECLI}" object-storage keys-delete "${OLD_KEY_ID}" >/dev/null; then
+        "${LINODECLI}" object-storage keys-delete "${NEW_KEY_ID}" >/dev/null 2>&1 || true
+        rm -f "${RESET_CSV_TMP}"
+        echo "ERROR: could not revoke old key; slot remains unavailable" >&2
+        exit 1
+    fi
+    mv "${RESET_CSV_TMP}" "${CSV}"
+    # A student who copied the old key could write during the rotation window.
+    # Empty once more after revocation so the released bucket is actually clean.
+    ${S3_EMPTY} --endpoint "${ENDPOINT}" --region "${OBJ_REGION}" \
+        --bucket "${BUCKET}" --access-key "${NEW_AK}" --secret-key "${NEW_SK}" >/dev/null
+    echo "Reset storage for ${RESET_SLOT}: emptied ${BUCKET} and rotated its key."
+    exec "$0" -n "${COUNT}" --region "${REGION}" --prefix "${PREFIX}" \
+        --namespace "${NAMESPACE}" --cluster-access "${CLUSTER_ACCESS}"
+fi
 
 cleanup_tmp() { rm -f "${CSV_TMP}" "${SECRETS_TMP}"; }
 trap cleanup_tmp ERR

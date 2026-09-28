@@ -6,6 +6,7 @@ threat model prioritizes, in order:
 1. **Student isolation** — one student cannot affect another's workspace.
 2. **Cluster integrity** — workspace pods cannot escalate privileges or reach cluster resources.
 3. **Inference containment** — the GPU endpoint is never exposed to the public internet.
+4. **Short-lived identity data** — registration data exists only for the workshop lifecycle.
 
 Non-goals (given the ephemeral nature): long-term credential rotation, audit logging,
 multi-tenant hardening beyond the controls below.
@@ -120,8 +121,28 @@ renders byte-identical (the `__OBJECT_STORAGE_ENVFROM__` sentinel is dropped).
 
 - Each workspace gets a unique random password (`openssl rand -hex 16`), stored as a
   Kubernetes Secret and injected via env.
-- Students receive passwords on printed access cards — no shared credentials.
+- The join portal maps a normalized email address to one workspace slot. PocketBase stores
+  the name, email, slot number, and reset-in-progress flag on a single-replica SQLite PVC. Workspace
+  passwords remain in the generated Kubernetes slot-inventory Secret, not in PocketBase.
+- The portal uses the pinned community image
+  `ghcr.io/muchobien/pocketbase:0.40.4@sha256:9390b7b63ce114dbab577be72e6ef75f718a19083866607fcbdd1b915632b943`.
+  It runs non-root with a read-only root filesystem, no service-account token, and only an
+  ingress-nginx → port 8090 NetworkPolicy allowance.
+- PocketBase collection APIs are closed to unauthenticated users; public assignment is only
+  available through `POST /api/workshop/register`. Credential responses are marked
+  `Cache-Control: no-store`.
+- The built-in PocketBase dashboard uses a random local superuser password from the
+  `join-portal-admin` Secret. No PocketBase cloud account or external email service exists.
 - No SSH to nodes or pods — code-server over HTTPS only.
+
+### Email trust boundary
+
+Email is an identifier, **not proof of identity**. The portal intentionally performs no email
+verification in v1. Anyone who knows an attendee's email can retrieve that attendee's slot and
+workspace password. This is acceptable only for the time-boxed, instructor-led classroom threat
+model. Existing code-server/Jupyter passwords remain the final access gate.
+Reclaiming a used slot rotates that password and invalidates the old workspace process;
+it does not prevent someone from entering the same unverified email again later.
 
 ## TLS
 
@@ -141,15 +162,17 @@ Linode cloud-firewall controller.
 | Credential | Storage | Rotation |
 |---|---|---|
 | Linode API token | Env var (`TF_VAR_token` / `LINODE_TOKEN`) — never written to a file by the wizard | Per-event |
-| Workspace passwords | K8s Secrets | Generated per deployment (`--rotate` to reset) |
-| Object Storage keys (`object_storage: managed`) | Bucket-scoped limited key per student; K8s Secret + `generated/object-storage.csv` (gitignored) | Preserved across re-runs; revoked at teardown |
+| Workspace passwords | K8s Secrets and generated CSV/inventory | `--rotate` for all; `reset-student.py` for one used slot |
+| Student registration | PocketBase SQLite PVC (name, email, slot, resetting flag) | Released only after successful per-slot reset; deleted on teardown |
+| Portal administrator | `join-portal-admin` K8s Secret | Generated once and preserved across manifest re-renders |
+| Object Storage keys (`object_storage: managed`) | Bucket-scoped limited key per student; K8s Secret + `generated/object-storage.csv` (gitignored) | Preserved across re-runs; one slot's key rotated by reset; revoked at teardown |
 | HuggingFace token | Not required (ungated models only); optional Secret for gated models | N/A |
 | vLLM auth | None — endpoint is private (ClusterIP + default-deny) | N/A |
 
 ## Cluster lifecycle
 
 - Provisioned shortly before the event; destroyed with `make teardown` after.
-- No persistent volumes beyond the vLLM model cache PVCs (deleted on teardown).
+- The vLLM model cache and join-portal SQLite PVCs are deleted on teardown.
 - Terraform state is local (not a remote backend).
 
 ## Hardening for longer-lived use

@@ -232,6 +232,11 @@ infra/kubeconfig.yaml
 infra/model-mirror.conf
 infra/.certs/
 
+# Disposable, machine-local student-access Kind harness (never part of a PR)
+tests/kind-student-access.md
+tests/kind-student-access.py
+tests/kind-student-access.yaml
+
 # Autonomous build scaffolding (not part of the feature)
 CLAUDE.md
 build.sh

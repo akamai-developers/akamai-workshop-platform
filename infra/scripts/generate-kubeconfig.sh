@@ -36,6 +36,7 @@ TOKEN_TTL="${KUBECONFIG_TTL:-720h}"
 KUBECTL="${KUBECTL:-kubectl}"
 SERVER="${KUBECONFIG_SERVER:-}"
 CA_DATA="${KUBECONFIG_CA_DATA:-}"
+SLOT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -45,6 +46,8 @@ while [[ $# -gt 0 ]]; do
         --ttl) TOKEN_TTL="$2"; shift 2 ;;
         --server) SERVER="$2"; shift 2 ;;
         --ca-data) CA_DATA="$2"; shift 2 ;;
+        --slot) SLOT="$2"; shift 2 ;;
+        --output) OUT="$2"; OUT_TMP="${OUT}.tmp"; shift 2 ;;
         -h|--help)
             cat <<EOF
 Usage: $0 [-n COUNT] [--namespace NS] [options]
@@ -54,12 +57,19 @@ Usage: $0 [-n COUNT] [--namespace NS] [options]
   --ttl            Bound-token lifetime passed to 'kubectl create token' (default: 720h)
   --server         API server URL (default: derived from the current kubectl context)
   --ca-data        base64 cluster CA (default: derived from the current kubectl context)
+  --slot           Emit only sNN (used when rebuilding one student's namespace)
+  --output         Write to this path instead of the classroom-wide generated file
 EOF
             exit 0
             ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ -n "${SLOT}" && ! "${SLOT}" =~ ^s([0-9]{2})$ ]]; then
+    echo "ERROR: --slot must be sNN" >&2
+    exit 1
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -92,7 +102,14 @@ fi
 : > "${OUT_TMP}"
 trap 'rm -f "${OUT_TMP}"' ERR
 
-for i in $(seq 1 "${COUNT}"); do
+FIRST=1
+LAST="${COUNT}"
+if [[ -n "${SLOT}" ]]; then
+    FIRST=$((10#${SLOT#s}))
+    LAST="${FIRST}"
+    [[ ${FIRST} -le ${COUNT} ]] || { echo "ERROR: ${SLOT} exceeds count ${COUNT}" >&2; exit 1; }
+fi
+for i in $(seq "${FIRST}" "${LAST}"); do
     PADDED=$(printf "%02d" "$i")
     NS="${NAMESPACE}-s${PADDED}"
     TOKEN="$("${KUBECTL}" create token "${SA}" -n "${NS}" --duration="${TOKEN_TTL}")"
@@ -143,7 +160,7 @@ done
 
 mv "${OUT_TMP}" "${OUT}"
 
-echo "Wrote ${COUNT} scoped kubeconfig Secrets → ${OUT}"
+echo "Wrote scoped kubeconfig Secret(s) → ${OUT}"
 echo "  server: ${SERVER}"
 echo "  ttl:    ${TOKEN_TTL}  (API server may clamp)"
 echo "Apply with: kubectl apply -f ${OUT}"

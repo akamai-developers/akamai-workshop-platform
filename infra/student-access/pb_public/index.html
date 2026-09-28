@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Join the workshop</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="intro" aria-labelledby="page-title">
+      <div class="eyebrow"><span aria-hidden="true"></span> Workshop access</div>
+      <h1 id="page-title">Claim your<br><em>workspace.</em></h1>
+      <p class="lede">Enter the email you will use for this workshop. We will remember your workspace assignment if you return from another device.</p>
+      <div class="signal" aria-hidden="true">
+        <span>01</span><i></i><span>ASSIGN</span><i></i><span>OPEN</span>
+      </div>
+    </section>
+
+    <section class="panel" aria-live="polite">
+      <form id="registration-form" novalidate>
+        <div class="panel-heading">
+          <span class="step">01 / ACCESS</span>
+          <h2>Let’s get you set up.</h2>
+        </div>
+
+        <label for="name">Your name</label>
+        <input id="name" name="name" type="text" autocomplete="name" maxlength="100" required placeholder="Ada Lovelace">
+        <p class="field-error" id="name-error"></p>
+
+        <label for="email">Email address</label>
+        <input id="email" name="email" type="email" autocomplete="email" maxlength="254" required placeholder="ada@example.com">
+        <p class="field-error" id="email-error"></p>
+
+        <button id="submit-button" type="submit">
+          <span>Assign my workspace</span>
+          <span aria-hidden="true">↗</span>
+        </button>
+
+        <p class="privacy">Your details are used only to restore your assignment and are deleted when the workshop environment is torn down.</p>
+        <p class="form-error" id="form-error" role="alert"></p>
+      </form>
+
+      <div id="assignment" class="assignment" hidden>
+        <div class="panel-heading">
+          <span id="assignment-kicker" class="step">READY</span>
+          <h2 id="assignment-title">Your workspace is ready.</h2>
+        </div>
+
+        <div class="slot-row">
+          <span>Workspace</span>
+          <strong id="student-number">s01</strong>
+        </div>
+
+        <div class="credential">
+          <span>Password</span>
+          <code id="workspace-password"></code>
+          <button id="copy-password" class="copy" type="button">Copy</button>
+        </div>
+
+        <a id="open-workspace" class="open-link" href="#" target="_blank" rel="noopener">
+          Open workspace <span aria-hidden="true">↗</span>
+        </a>
+        <p class="launch-note" id="launch-note">Your workspace should open in a new tab.</p>
+        <button id="start-over" class="text-button" type="button">Use a different email</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>AKAMAI WORKSHOP PLATFORM</span>
+    <span>SELF-SERVICE ACCESS</span>
+  </footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -34,6 +34,7 @@ region:       us-ord                 # "" → wizard lists live GPU regions (see
 # cluster_access:  none               # none (default) | scoped (per-student ns + kubeconfig + NetworkPolicy)
 # object_storage:  none               # none (default) | managed (per-student bucket + scoped key)
 # agent_deploy:    none               # none (default) | plain (needs cluster_access: scoped). kagent = reserved/v2
+# student_access:  portal             # portal (default) | cards; cards are always generated as fallback
 # inference_endpoint: ""              # REQUIRED for inference: external — OpenAI-compatible URL the workshop calls
 # inference_api_key:  ""              # optional bearer key for inference_endpoint (external only)
 # Notes: dedicated-vllm requires cluster_access: scoped (each student's vLLM lives in
@@ -58,3 +59,4 @@ region:       us-ord                 # "" → wizard lists live GPU regions (see
 # k8s_version:     "1.34"
 # allowed_cidr:    0.0.0.0/0          # restrict ingress to a classroom CIDR
 # workspace_image: codercom/code-server:latest   # stock image + startup.sh ConfigMap (no Docker)
+# student_access_image: "ghcr.io/muchobien/pocketbase:0.40.4@sha256:..." # advanced override

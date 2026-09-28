@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Workshop check-in</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body class="presenter">
+  <main class="presenter-card">
+    <section>
+      <div class="eyebrow"><span aria-hidden="true"></span> Student check-in</div>
+      <h1>Scan.<br><em>Claim.</em><br>Build.</h1>
+      <p class="lede">Scan the code or type the address to claim your workshop space.</p>
+      <p id="join-url" class="join-url"></p>
+    </section>
+    <section class="qr-frame" aria-label="QR code for the workshop join page">
+      <div id="qrcode"></div>
+      <span>OPEN CAMERA TO JOIN ↗</span>
+    </section>
+  </main>
+  <script src="/qrcode.min.js"></script>
+  <script src="/present.js"></script>
+</body>
+</html>
