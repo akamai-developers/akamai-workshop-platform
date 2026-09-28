@@ -1,27 +1,27 @@
 # Student access portal
 
-This directory is mounted directly into a stock PocketBase container:
+The deployment mounts this directory into a PocketBase container:
 
 - `pb_migrations/` creates the private `registrations` collection.
 - `pb_hooks/` exposes `POST /api/workshop/register`.
-- `pb_public/` serves the student form and classroom QR presenter.
+- `pb_public/` serves the sign-up form and classroom QR page.
 
-No application image is built by this repository. `generate-student-access.py` uses
-`ghcr.io/muchobien/pocketbase:0.40.4` pinned to its multi-architecture OCI digest and
-mounts these files through ConfigMaps. PocketBase does not publish an official image or
-Kubernetes chart; its [production documentation](https://pocketbase.io/docs/going-to-production/)
-provides only an example Dockerfile. The selected community image is maintained at
-[muchobien/pocketbase-docker](https://github.com/muchobien/pocketbase-docker).
+We don't build an application image here. `generate-student-access.py` uses
+`ghcr.io/muchobien/pocketbase:0.40.4`, pinned to a multi-architecture OCI digest,
+and mounts the portal files through ConfigMaps. PocketBase's
+[production guide](https://pocketbase.io/docs/going-to-production/) gives an example
+Dockerfile but no official image or Kubernetes chart. We use the community image
+from [muchobien/pocketbase-docker](https://github.com/muchobien/pocketbase-docker).
 
-`generate-pods.sh --student-access cards` removes only the **local generated portal
-manifest**. `kubectl apply -f generated/` does not prune a previously deployed portal,
-its PVC, or its registrations. Use `deploy.sh` in cards mode for a live transition; that
-path explicitly removes the old portal resources and registration PVC. Back up any
-registrations you need before switching.
+`generate-pods.sh --student-access cards` removes only the **locally generated
+portal manifest**. Running `kubectl apply -f generated/` afterward will not remove
+a portal that's already deployed, its PVC, or its registrations. To switch a live
+classroom to cards mode, use `deploy.sh`. It removes the portal resources and
+registration PVC. Back up any registrations you need first.
 
-The available third-party Helm chart was not adopted because it targets PocketBase 0.29.3,
-while the portal is tested against 0.40.4, and this project already owns the surrounding
-namespace, TLS, ingress, and NetworkPolicy generation.
+We didn't use the third-party Helm chart we found: it targets PocketBase 0.29.3,
+while this portal is tested against 0.40.4. This project also generates its own
+namespace, TLS, ingress, and NetworkPolicy resources.
 
 ## Updating PocketBase
 

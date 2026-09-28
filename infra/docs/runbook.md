@@ -20,7 +20,7 @@ make deploy
 
 The wizard provisions the LKE cluster (CPU + GPU pools), gpu-operator, ingress-nginx
 (+ NodeBalancer), the vLLM StatefulSet, wildcard TLS, and the per-student workspaces, then
-writes `infra/manifests/generated/access-cards.csv` and deploys the self-service join portal.
+writes `infra/manifests/generated/access-cards.csv` and starts the student join portal.
 Expect node counts to match the sizing preview (e.g. 80 students → 5 GPU + 5 CPU nodes).
 
 ## T-15m: Validate
@@ -50,21 +50,21 @@ passwords for everyone (e.g. between cohorts); the previous CSV is archived to `
 
 ## T-5m: Prepare student check-in
 
-Open `https://join.<base-host>/present.html` on the classroom screen. It displays the shared
-join URL and a locally rendered QR code. Test a registration with an unused email and verify
-that the assigned workspace opens in a new tab. This consumes a real slot. Before students
-arrive, reclaim it with the per-slot reset below; do not merely delete a registration after
-opening its workspace.
+Put `https://join.<base-host>/present.html` on the classroom screen. The page shows the
+join URL and a QR code generated in the browser. Try signing up with an unused email;
+make sure the workspace opens in a new tab. That test claims a real slot. Reset it
+before students arrive using the procedure below. Once you've opened the workspace,
+deleting its registration is not enough.
 
-The PocketBase administrator is `admin@workshop.local`. Retrieve its generated password with:
+The PocketBase admin username is `admin@workshop.local`. To get its generated password:
 
 ```bash
 kubectl -n <ns> get secret join-portal-admin \
   -o jsonpath='{.data.PB_ADMIN_PASSWORD}' | base64 -d; echo
 ```
 
-Use `https://join.<base-host>/_/` to correct a mistyped email or name. Delete a registration
-only if the workspace was never used; a used workspace needs the reset procedure below.
+Use `https://join.<base-host>/_/` to fix a mistyped email or name. Only delete a
+registration if nobody has used its workspace. Otherwise, run the reset below.
 
 Keep the original cards ready as a fallback:
 
@@ -72,48 +72,50 @@ Keep the original cards ready as a fallback:
 ./scripts/print-access-cards.sh           # → infra/manifests/generated/access-cards.html
 ```
 
-Open the HTML and print, or keep `access-cards.csv` available to the instructor.
+Print the HTML or keep `access-cards.csv` available to the instructor.
 
 ## T+0: Class begins
 
-Students scan the shared QR code, enter their name and email, and receive their workspace.
-They then log into code-server/Jupyter with the displayed workspace password. Re-entering the
-same email restores the assignment from any device. Inference is reached at
+Students scan the QR code, enter their name and email, and get a workspace. They
+log into code-server/Jupyter with the password shown on the join page. If they
+return later from another device, entering the same email brings back the same
+assignment. Inference is reached at
 `http://vllm:8000/v1` from inside the workspace.
 
 ## Reclaim a used workspace
 
-For an accidental claim that was **never opened**, an instructor can delete its PocketBase
-registration at `https://join.<base-host>/_/`. Once a student has used the workspace, do not
-delete the registration directly: its password, browser session, files, agent, or bucket
-may still belong to the previous student.
+If someone claimed a slot by mistake but **never opened the workspace**, an instructor
+can delete the registration at `https://join.<base-host>/_/`. If they used the
+workspace, don't delete the registration directly. Its password, browser session,
+files, agent, or bucket may still belong to that student.
 
-From the deployment checkout with `infra/kubeconfig.yaml` and the gitignored
-`infra/manifests/generated/` state, inspect one slot and then confirm its destructive reset:
+Use the deployment checkout containing `infra/kubeconfig.yaml` and the gitignored
+`infra/manifests/generated/` state. Preview the reset first, then confirm it:
 
 ```bash
 python3 infra/scripts/reset-student.py --slot s01
 python3 infra/scripts/reset-student.py --slot s01 --confirm
 ```
 
-The command marks the registration **resetting** so the portal cannot return that slot,
-removes the old workspace, rotates its password, restores the workspace baseline, and only
-then deletes the registration to make the slot available. In scoped mode it rebuilds the
-entire student's namespace, including their agent and dedicated vLLM configuration. Its
-model-cache PVC is also removed; allow for a cold model download. Managed Object Storage
-is emptied and only that student's key is rotated. Shared vLLM is deliberately **not**
-restarted, because other students use it. External inference cannot be reset here.
+The command marks the registration **resetting**, so the portal stops handing out
+that slot. It removes the old workspace, rotates its password, restores the
+workshop baseline, and releases the slot only after those steps succeed. In scoped
+mode, it rebuilds the student's namespace, including their agent and dedicated
+vLLM configuration. It also removes that student's model-cache PVC, so the model
+may need to download again. For managed Object Storage, it empties the student's
+bucket and rotates only their key. Shared vLLM stays up for everyone else.
+This command cannot reset external inference.
 
-This permanently removes the student's work. Do not run it while they are still working.
-If any step fails, the registration stays blocked (`resetting=true`); fix the reported
-problem, reconcile generated state with the live Secrets if necessary, and rerun the command.
-Do not manually delete the registration until the
-workspace, storage, and credentials have been verified clean. This procedure requires the
-original generated state and the operator kubeconfig; neither is stored in Git.
+This permanently deletes the student's work. Don't run it while they're still
+working. If a step fails, the registration stays blocked (`resetting=true`). Fix
+the reported problem, reconcile generated state with the live Secrets if needed,
+and rerun the command. Don't delete the registration by hand until you've checked
+the workspace, storage, and credentials. The reset needs the original generated
+state and operator kubeconfig; neither is stored in Git.
 
-Email remains an unverified identifier: after release, someone entering the same email
-could claim the now-free slot again. If that must be prohibited, use stronger identity or
-an instructor approval gate.
+Email is not verified. After a reset, someone can enter the same email and claim
+the newly available slot again. If that's a problem for your workshop, use
+stronger identity checks or instructor approval.
 
 ## T+end: Tear down (stops billing)
 
@@ -128,7 +130,7 @@ linode-cli lke clusters-list   # verify nothing lingers
 |---|---|
 | vLLM pod crash | `kubectl -n <ns> rollout restart statefulset/vllm` |
 | Student can't connect | `kubectl -n <ns> get pod ws-NN` (and see [troubleshooting.md](troubleshooting.md)) |
-| Portal unavailable | Inspect the named Deployment, PVC, and Ingress with the commands in [troubleshooting](troubleshooting.md#the-join-portal-is-unavailable); cards remain the fallback |
+| Portal unavailable | Check its Deployment, PVC, and Ingress using the [troubleshooting steps](troubleshooting.md#the-join-portal-is-unavailable); use cards if needed |
 | Student mistyped email | Correct the record at `https://join.<base-host>/_/`; delete only an unused accidental claim |
 | All workspaces down | Check CPU nodes: `kubectl get nodes` |
 | No GPU capacity at deploy | Retry another region / smaller plan — see [sizing.md](sizing.md) |

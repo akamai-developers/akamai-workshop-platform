@@ -18,18 +18,20 @@ kubectl -n <ns> logs deployment/join-portal
 kubectl -n <ns> get secret join-portal-slots
 ```
 
-The portal needs a bound `join-portal-data` PVC and a valid `join-portal-slots` Secret. If it
-cannot be restored before class starts, use `access-cards.csv` or the printable cards.
+Check that the `join-portal-data` PVC is bound and the `join-portal-slots` Secret
+exists. If you can't get the portal working before class, hand out the printable
+cards or use `access-cards.csv`.
 
 ### "I entered the wrong email" or "my slot is unavailable"
 
-Open `https://join.<base-host>/_/`, sign in as `admin@workshop.local`, and edit or delete the
-registration. Delete a record only for an unused, accidental claim. For a workspace that
-has been opened, run the [per-slot reset](runbook.md#reclaim-a-used-workspace) before
-reassigning it; deleting the record alone leaves the former student's state and password.
-Retrieve the password from the `join-portal-admin` Secret as shown in the
-[runbook](runbook.md). Do not shrink the workspace count after registration has begun; an
-assignment whose slot was removed is deliberately not reassigned automatically.
+Open `https://join.<base-host>/_/` and sign in as `admin@workshop.local` to correct
+the registration. You can delete an accidental claim only if nobody used its
+workspace. Otherwise, use the [per-slot reset](runbook.md#reclaim-a-used-workspace)
+before assigning it to someone else. Deleting the record alone leaves the old
+student's state and password behind. The [runbook](runbook.md) shows how to get
+the admin password from the `join-portal-admin` Secret. Once sign-up begins, don't
+reduce the workspace count: the portal will not automatically move an assignment
+whose slot no longer exists.
 
 ### "I can't connect to my workspace"
 

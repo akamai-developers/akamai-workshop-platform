@@ -1,6 +1,6 @@
 # akamai-workshop-platform
 
-`akamai-workshop-platform` provisions a per-student GPU workshop classroom on [Akamai Cloud](https://www.linode.com/) (Linode LKE) with one interactive wizard, then tears it down with one command. The platform provides per-student browser IDEs ([code-server](https://github.com/coder/code-server) or JupyterLab), GPU [vLLM](https://github.com/vllm-project/vllm) inference, a self-service workspace assignment portal, TLS, and Kubernetes networking. You pick a workshop (or point it at any content repo), confirm a cost preview, and get a running classroom plus printable fallback access cards.
+`akamai-workshop-platform` sets up a GPU workshop classroom on [Akamai Cloud](https://www.linode.com/) (Linode LKE) and tears it down when you're done. Each student gets a browser IDE ([code-server](https://github.com/coder/code-server) or JupyterLab) and access to GPU [vLLM](https://github.com/vllm-project/vllm) inference. The platform also handles workspace sign-up, TLS, and Kubernetes networking. Choose a workshop (or bring your own content repo), review the cost preview, and launch the classroom. Printable access cards are available as a backup.
 
 The wizard offers ready-made workshops as presets — the interactive default is the [Solution Architect Agent](https://github.com/akamai-developers/akamai-workshop-solution-architect-agent) (JupyterLab); the [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop) is another. The platform is content-agnostic — any content repo works.
 
@@ -34,7 +34,7 @@ You do not need a HuggingFace token, because the model menu is ungated only. You
 - **Domain-optional:** with no domain, the platform uses `sslip.io` hostnames and self-signed TLS (the default). With a domain, it uses Linode DNS and a Let's Encrypt wildcard certificate.
 - **Live region and capacity check:** the wizard discovers GPU-capable regions and validates GPU capacity before provisioning, so a capacity shortage never leaves a partially built cluster that keeps billing.
 - **Private inference:** vLLM and the multi-model agentgateway stay cluster-internal behind ClusterIP services and a default-deny NetworkPolicy. Off-cluster access uses `kubectl port-forward` only, with no public endpoint. Multi-model deployments also require an API key on the gateway.
-- **Self-service check-in:** students scan one shared QR code or open `https://join.<base-host>`, enter their name and email, and receive the next workspace. The same normalized email returns the same assignment from any device.
+- **Self-service check-in:** students scan a shared QR code or visit `https://join.<base-host>`, enter their name and email, and get a workspace. They can return to that workspace from any device by entering the same email.
 
 ## Quick start
 
@@ -54,7 +54,7 @@ make deploy            # or: ./deploy.sh
 make teardown          # or: ./deploy.sh teardown
 ```
 
-After the deploy finishes, show `https://join.<base-host>/present.html` on the classroom screen. Students scan the shared QR code or type the displayed join URL. The original access cards remain available as a fallback:
+Once deployment finishes, open `https://join.<base-host>/present.html` on the classroom screen. Students can scan the QR code or type the displayed URL. Keep the access cards handy in case the portal is unavailable:
 
 ```bash
 # View the raw CSV
@@ -67,12 +67,12 @@ open infra/manifests/generated/access-cards.html
 
 The CSV contains one row per student with `student_number`, `url`, and `password` columns.
 
-To reclaim a workspace someone used, run the instructor-only
+To give a used workspace to another student, follow the instructor-only
 [`reset-student.py`](infra/scripts/reset-student.py) procedure in the
-[classroom runbook](infra/docs/runbook.md#reclaim-a-used-workspace); deleting a
-PocketBase registration alone does not clear the old student's workspace.
+[classroom runbook](infra/docs/runbook.md#reclaim-a-used-workspace). Deleting a
+PocketBase registration alone leaves the previous student's workspace intact.
 
-The portal is completely self-hosted in the workshop cluster. It does not require a PocketBase account, SMTP provider, or email verification. Set `student_access: cards` (or pass `--student-access cards`) to omit it. Switching a running classroom to cards mode deletes the portal PVC and its registrations.
+The portal runs in the workshop cluster; no PocketBase account, SMTP provider, or email verification is needed. To use cards without a portal, set `student_access: cards` (or pass `--student-access cards`). If you switch an existing classroom to cards mode, deployment deletes the portal PVC and its registrations.
 
 For non-interactive runs (CI or scripted), copy `config.example.yaml` to `config.yaml`, edit it, then run:
 
@@ -98,7 +98,7 @@ These inputs are the entire user surface. Anything you omit is filled by the wiz
 | `content_repo` | `""` | Git repo cloned into each workspace at startup. Blank uses `akamai-developers/ai-agents-workshop`. Also accepts a full git URL, `owner/repo`, or a bare repo name. |
 | `domain` | `""` (no domain) | Empty uses `sslip.io` and self-signed TLS. A value uses Linode DNS and Let's Encrypt. |
 | `region` | nearest GPU region | Chosen from the live list of GPU-capable Akamai regions |
-| `student_access` | `portal` | `portal` deploys self-service check-in and still generates cards; `cards` deploys no portal. CLI: `--student-access` |
+| `student_access` | `portal` | `portal` enables self-service check-in and still generates cards; `cards` skips the portal. CLI: `--student-access` |
 
 Workspaces are wired with the inference endpoint under **both** naming conventions — `VLLM_HOST`/`MODEL_NAME` (the platform's) and `VLLM_BASE_URL`/`VLLM_MODEL_ID` (what the Solution Architect Agent notebooks read) — so content that uses either set connects with no student configuration. When an embedding model is deployed, `EMBEDDING_BASE_URL`/`EMBEDDING_MODEL_ID` are injected too.
 
@@ -174,7 +174,7 @@ the original platform.
 | `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |
 | `object_storage` | `none` \| `managed` | Per-student bucket + bucket-scoped key |
 | `agent_deploy` | `none` \| `plain` | Ship the student's agent to their namespace (requires `cluster_access: scoped`) |
-| `student_access` | `portal` \| `cards` | Shared self-registration portal, or cards-only entry. Cards are generated in both modes. |
+| `student_access` | `portal` \| `cards` | Let students claim a workspace through the portal, or use cards only. Cards are generated in both modes. |
 
 ```yaml
 # config.yaml — an "own your inference" workshop
