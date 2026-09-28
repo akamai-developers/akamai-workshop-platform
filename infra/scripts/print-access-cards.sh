@@ -5,8 +5,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$(dirname "$SCRIPT_DIR")"
-CSV="${INFRA_DIR}/manifests/generated/access-cards.csv"
-HTML="${INFRA_DIR}/manifests/generated/access-cards.html"
+OUTPUT_DIR="${OUTPUT_DIR:-${INFRA_DIR}/manifests/generated}"
+CSV="${OUTPUT_DIR}/access-cards.csv"
+HTML="${OUTPUT_DIR}/access-cards.html"
 HELM_VALUES="${INFRA_DIR}/manifests/helm-values.yaml"
 
 if [ ! -f "${CSV}" ]; then

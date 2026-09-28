@@ -113,6 +113,15 @@ setup() {
   [[ "$(cat "$f")" != *"client-certificate"* ]]
 }
 
+@test "generate-kubeconfig can remint only one student's token for reset" {
+  OUTPUT_DIR="${OUT}" KUBECTL="${FAKES_DIR}/kubectl" run "${GENKUBE}" -n 2 \
+      --namespace workshop --slot s01 --output "${OUT}/reset-kubeconfig.yaml"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^kind: Secret' "${OUT}/reset-kubeconfig.yaml")" -eq 1 ]
+  grep -q 'namespace: workshop-s01' "${OUT}/reset-kubeconfig.yaml"
+  ! grep -q 'workshop-s02' "${OUT}/reset-kubeconfig.yaml"
+}
+
 # --- shared-vllm + scoped cross-namespace reachability (Phase 8 fix) -----------
 
 @test "scoped: shared vLLM policy admits workspaces from per-student namespaces" {

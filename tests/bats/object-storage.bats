@@ -82,6 +82,30 @@ setup() {
   grep -q 'namespace: workshop-s02' "${OUT}/workspace-object-storage.yaml"
 }
 
+@test "reset-slot empties and rekeys only the selected student's bucket" {
+  OUTPUT_DIR="${OUT}" run "${PROV}" -n 2 --region us-ord --prefix acme-2026
+  [ "$status" -eq 0 ]
+  export FAKE_S3_LOG="${BATS_TEST_TMPDIR}/reset-s3.log"; : > "${FAKE_S3_LOG}"
+  export S3_EMPTY="${FAKES_DIR}/s3-empty"
+  export FAKE_OBJ_KEY_CREATE='[{"id":5555,"access_key":"NEWACCESS","secret_key":"NEWSECRET"}]'
+  : > "${FAKE_LINODE_LOG}"
+  OUTPUT_DIR="${OUT}" run "${PROV}" -n 2 --region us-ord --prefix acme-2026 \
+      --reset-slot s01 --confirm-reset
+  [ "$status" -eq 0 ]
+  grep -q -- '--bucket acme-2026-s01' "${FAKE_S3_LOG}"
+  ! grep -q -- '--bucket acme-2026-s02' "${FAKE_S3_LOG}"
+  assert_linode_called 'object-storage keys-delete 4242'
+  grep -q '^s01,acme-2026-s01,5555,NEWACCESS,NEWSECRET$' "${OUT}/object-storage.csv"
+  grep -q '^s02,acme-2026-s02,4242,FAKEACCESS,FAKESECRET$' "${OUT}/object-storage.csv"
+}
+
+@test "reset-slot requires explicit destructive confirmation" {
+  OUTPUT_DIR="${OUT}" run "${PROV}" -n 1 --region us-ord --prefix acme-2026 \
+      --reset-slot s01
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--confirm-reset"* ]]
+}
+
 # --- teardown -----------------------------------------------------------------
 
 @test "teardown revokes every key + empties/deletes every bucket by prefix" {

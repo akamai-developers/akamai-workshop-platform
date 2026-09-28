@@ -6,6 +6,7 @@ threat model prioritizes, in order:
 1. **Student isolation** — one student cannot affect another's workspace.
 2. **Cluster integrity** — workspace pods cannot escalate privileges or reach cluster resources.
 3. **Inference containment** — the GPU endpoint is never exposed to the public internet.
+4. **Short-lived student data** — keep registrations only for the life of the workshop.
 
 Non-goals (given the ephemeral nature): long-term credential rotation, audit logging,
 multi-tenant hardening beyond the controls below.
@@ -120,8 +121,32 @@ renders byte-identical (the `__OBJECT_STORAGE_ENVFROM__` sentinel is dropped).
 
 - Each workspace gets a unique random password (`openssl rand -hex 16`), stored as a
   Kubernetes Secret and injected via env.
-- Students receive passwords on printed access cards — no shared credentials.
+- The join portal uses a normalized email address to look up one workspace slot.
+  PocketBase stores the student's name, email, slot number, and reset-in-progress
+  flag on a SQLite PVC, with one portal replica. Workspace passwords stay in the
+  generated Kubernetes slot-inventory Secret, not in PocketBase.
+- The portal uses the pinned community image
+  `ghcr.io/muchobien/pocketbase:0.40.4@sha256:9390b7b63ce114dbab577be72e6ef75f718a19083866607fcbdd1b915632b943`.
+  It runs as non-root with a read-only root filesystem and no service-account
+  token. Its NetworkPolicy allows only ingress-nginx to reach port 8090.
+- Unauthenticated users cannot access the PocketBase collection APIs. Students
+  request assignments through `POST /api/workshop/register`; responses containing
+  credentials use `Cache-Control: no-store`.
+- The PocketBase admin dashboard uses a random local superuser password from the
+  `join-portal-admin` Secret. No PocketBase cloud account or external email
+  service is needed.
 - No SSH to nodes or pods — code-server over HTTPS only.
+
+### Email trust boundary
+
+Email identifies a registration; it does **not** prove who is entering it. This
+version does not verify email addresses. Anyone who knows a student's email can
+retrieve that student's slot and workspace password. This tradeoff is intended
+only for a short, instructor-led workshop. Code-server/Jupyter still asks for
+the workspace password, but the portal gives that password to anyone who enters
+the matching email. Resetting a used slot rotates the password and replaces the
+old workspace process. It does not stop someone from using the same unverified
+email again later.
 
 ## TLS
 
@@ -141,15 +166,17 @@ Linode cloud-firewall controller.
 | Credential | Storage | Rotation |
 |---|---|---|
 | Linode API token | Env var (`TF_VAR_token` / `LINODE_TOKEN`) — never written to a file by the wizard | Per-event |
-| Workspace passwords | K8s Secrets | Generated per deployment (`--rotate` to reset) |
-| Object Storage keys (`object_storage: managed`) | Bucket-scoped limited key per student; K8s Secret + `generated/object-storage.csv` (gitignored) | Preserved across re-runs; revoked at teardown |
+| Workspace passwords | K8s Secrets and generated CSV/inventory | `--rotate` for all; `reset-student.py` for one used slot |
+| Student registration | PocketBase SQLite PVC (name, email, slot, resetting flag) | Released after a successful per-slot reset; deleted on teardown |
+| Portal administrator | `join-portal-admin` K8s Secret | Generated once and preserved across manifest re-renders |
+| Object Storage keys (`object_storage: managed`) | Bucket-scoped limited key per student; K8s Secret + `generated/object-storage.csv` (gitignored) | Preserved across re-runs; one slot's key rotated by reset; revoked at teardown |
 | HuggingFace token | Not required (ungated models only); optional Secret for gated models | N/A |
 | vLLM auth | None — endpoint is private (ClusterIP + default-deny) | N/A |
 
 ## Cluster lifecycle
 
 - Provisioned shortly before the event; destroyed with `make teardown` after.
-- No persistent volumes beyond the vLLM model cache PVCs (deleted on teardown).
+- The vLLM model cache and join-portal SQLite PVCs are deleted on teardown.
 - Terraform state is local (not a remote backend).
 
 ## Hardening for longer-lived use

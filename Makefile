@@ -13,8 +13,9 @@
 
 ARGS ?=
 CONFIG ?=
+POCKETBASE_BIN ?= pocketbase
 
-.PHONY: deploy teardown capacity-test dry-run refresh-content mirror-models models sizing-selftest verify-default verify-config help
+.PHONY: deploy teardown capacity-test dry-run refresh-content mirror-models models sizing-selftest verify-default verify-config verify-student-access help
 
 deploy: ## Provision a classroom (interactive unless ARGS add --yes/--config)
 	./deploy.sh deploy $(ARGS)
@@ -51,6 +52,9 @@ verify-default: ## Prove the default path is intact (helm golden + sizing self-t
 verify-config: ## Validate a config via dry-run (CONFIG=path/to/config.yaml)
 	@test -n "$(CONFIG)" || { echo "usage: make verify-config CONFIG=examples/sa-agent.yaml"; exit 2; }
 	./deploy.sh deploy --dry-run --config $(CONFIG)
+
+verify-student-access: ## Exercise the portal against PocketBase 0.40.4 (set POCKETBASE_BIN=...)
+	POCKETBASE_BIN="$(POCKETBASE_BIN)" ./tests/student-access-integration.sh
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \

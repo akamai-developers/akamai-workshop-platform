@@ -86,6 +86,8 @@ OBJECT_STORAGE=""    # none (default) | managed
 AGENT_DEPLOY=""      # none (default) | plain; kagent reserved/v2
 INFERENCE_ENDPOINT="" # inference=external only: user-supplied OpenAI-compatible URL
 INFERENCE_API_KEY=""  # inference=external only: bearer key for that endpoint
+STUDENT_ACCESS=""     # portal (default) | cards
+STUDENT_ACCESS_IMAGE="" # optional PocketBase image override for portal mode
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -240,6 +242,7 @@ keys = {
  "cluster_access":"CLUSTER_ACCESS",
  "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
  "inference_endpoint":"INFERENCE_ENDPOINT","inference_api_key":"INFERENCE_API_KEY",
+ "student_access":"STUDENT_ACCESS","student_access_image":"STUDENT_ACCESS_IMAGE",
  # Workshop preset (a named composition; see apply_preset). 'workshop' is an alias.
  "preset":"PRESET","workshop":"PRESET",
 }
@@ -294,6 +297,8 @@ while [[ $# -gt 0 ]]; do
         --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
         --inference-endpoint) INFERENCE_ENDPOINT="$2"; shift 2 ;;
         --inference-api-key)  INFERENCE_API_KEY="$2"; shift 2 ;;
+        --student-access)     STUDENT_ACCESS="$2"; shift 2 ;;
+        --student-access-image) STUDENT_ACCESS_IMAGE="$2"; shift 2 ;;
         --preset|--workshop) PRESET="$2"; shift 2 ;;
         -y|--yes)            ASSUME_YES=1; shift ;;
         --dry-run)           DRY_RUN=1; shift ;;
@@ -622,6 +627,8 @@ GPU_TIMESLICING_REPLICAS="${GPU_TIMESLICING_REPLICAS:-2}"
 CLUSTER_ACCESS="${CLUSTER_ACCESS:-none}"
 OBJECT_STORAGE="${OBJECT_STORAGE:-none}"
 AGENT_DEPLOY="${AGENT_DEPLOY:-none}"
+STUDENT_ACCESS="${STUDENT_ACCESS:-portal}"
+STUDENT_ACCESS_IMAGE="${STUDENT_ACCESS_IMAGE:-ghcr.io/muchobien/pocketbase:0.40.4@sha256:9390b7b63ce114dbab577be72e6ef75f718a19083866607fcbdd1b915632b943}"
 
 case "$EDITOR" in code-server|jupyter) ;; *) err "editor must be 'code-server' or 'jupyter' (got '$EDITOR')" ;; esac
 case "$INFERENCE" in
@@ -639,6 +646,7 @@ case "$AGENT_DEPLOY" in
     kagent) err "agent_deploy 'kagent' is reserved for v2 (Agent CRD + controller not built yet). Use 'plain'." ;;
     *) err "agent_deploy must be 'none' or 'plain' (got '$AGENT_DEPLOY')" ;;
 esac
+case "$STUDENT_ACCESS" in portal|cards) ;; *) err "student_access must be 'portal' or 'cards' (got '$STUDENT_ACCESS')" ;; esac
 case "$GPUS_PER_STUDENT" in
     1) ;;
     2) err "gpus_per_student '2' is reserved for v2 (two-models + agentgateway routing). Use 1." ;;
@@ -777,6 +785,7 @@ if [[ $MULTI_MODEL -eq 0 ]]; then
     fi
     printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
     printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Student access:" "$([[ "$STUDENT_ACCESS" == "portal" ]] && echo 'self-registration portal + card fallback' || echo 'access cards')"
     echo ""
     [[ "$P_GATED" == "1" ]] && warn "${GPU_NODE_TYPE} is access-gated and may fail to provision."
 else
@@ -792,6 +801,7 @@ else
     printf "  ${DIM}%-14s${RESET} %s\n" "Routing:"    "agentgateway → ${MODELS}"
     printf "  ${DIM}%-14s${RESET} %s\n" "Workspaces:" "${CPU_NODE_COUNT}x ${CPU_NODE_TYPE}"
     printf "  ${DIM}%-14s${RESET} %s\n" "URLs:"       "s01..s$(printf '%02d' "$STUDENTS").<base-host>"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Student access:" "$([[ "$STUDENT_ACCESS" == "portal" ]] && echo 'self-registration portal + card fallback' || echo 'access cards')"
     echo ""
 fi
 
@@ -861,6 +871,8 @@ if interactive; then
                      --gpu-timeslicing-replicas "$GPU_TIMESLICING_REPLICAS" \
                      --cluster-access "$CLUSTER_ACCESS" \
                      --object-storage "$OBJECT_STORAGE" --agent-deploy "$AGENT_DEPLOY" \
+                     --student-access "$STUDENT_ACCESS" \
+                     --student-access-image "$STUDENT_ACCESS_IMAGE" \
                      ${INFERENCE_ENDPOINT:+--inference-endpoint "$INFERENCE_ENDPOINT"} \
                      ${INFERENCE_API_KEY:+--inference-api-key "$INFERENCE_API_KEY"} ;;
             t|T) "${SCRIPTS}/capacity-test.sh" --model "$MODEL" --region "$REGION" \
@@ -1029,6 +1041,7 @@ gpu_timeslicing_replicas: ${GPU_TIMESLICING_REPLICAS}
 cluster_access: ${CLUSTER_ACCESS}
 object_storage: ${OBJECT_STORAGE}
 agent_deploy: ${AGENT_DEPLOY}
+student_access: ${STUDENT_ACCESS}
 EOF
 )"
 
@@ -1121,6 +1134,10 @@ env NAMESPACE="$NAMESPACE" DOMAIN="$DOMAIN" SUBDOMAIN_PREFIX="$SUBDOMAIN_PREFIX"
 # ---- Base host (for student URLs) ----
 BASE_HOST="$(cd "$TF_DIR" && terraform output -raw base_host)"
 
+# The live Secret, when present, owns the portal admin credential. The renderer
+# consults this cluster before falling back to an existing local manifest.
+export KUBECONFIG="${INFRA}/kubeconfig.yaml"
+
 # ---- Generate per-student workspaces ----
 echo ""
 rule
@@ -1131,6 +1148,7 @@ GEN_PODS_ARGS=(-n "$STUDENTS" --host "$BASE_HOST"
     --workspace-type "$EDITOR" --content-repo "$CONTENT_REPO"
     --cluster-access "$CLUSTER_ACCESS" --agent-deploy "$AGENT_DEPLOY"
     --object-storage "$OBJECT_STORAGE")
+GEN_PODS_ARGS+=(--student-access "$STUDENT_ACCESS" --student-access-image "$STUDENT_ACCESS_IMAGE")
 [[ -n "$CONTENT_REF" ]] && GEN_PODS_ARGS+=(--content-ref "$CONTENT_REF")
 # An embedding model rides the gateway alongside the chat model: workspaces get its id
 # as EMBEDDING_MODEL_ID and EMBEDDING_BASE_URL=VLLM_HOST (the same gateway) for RAG.
@@ -1154,8 +1172,6 @@ else
         --model-names "$MODELS" --api-key "$GATEWAY_API_KEY")
 fi
 env NAMESPACE="$NAMESPACE" "${SCRIPTS}/generate-pods.sh" "${GEN_PODS_ARGS[@]}"
-
-export KUBECONFIG="${INFRA}/kubeconfig.yaml"
 
 # cluster_access=scoped: mint per-student scoped kubeconfigs (needs the namespaces +
 # ServiceAccounts that provision.sh already applied) and replicate the wildcard TLS
@@ -1203,6 +1219,20 @@ for _attempt in 1 2 3 4 5 6; do
     sleep 10
 done
 
+if [[ "$STUDENT_ACCESS" == "portal" ]]; then
+    kubectl -n "$NAMESPACE" rollout status deployment/join-portal --timeout=180s \
+        || err "join portal did not become ready"
+else
+    # A cards-only rerun must remove resources from an earlier portal-enabled apply;
+    # deleting the PVC also removes the now-unneeded student registration data.
+    kubectl -n "$NAMESPACE" delete --ignore-not-found \
+        deployment/join-portal service/join-portal ingress/join-portal \
+        networkpolicy/allow-ingress-to-join-portal pvc/join-portal-data \
+        configmap/join-portal-public configmap/join-portal-hooks \
+        configmap/join-portal-migrations secret/join-portal-slots \
+        secret/join-portal-admin >/dev/null
+fi
+
 # ---- Done ----
 CSV="${GEN_DIR}/access-cards.csv"
 echo ""
@@ -1226,6 +1256,12 @@ else
     printf '%b\n' "  ${DIM}               not exposed publicly (ClusterIP + NetworkPolicy-gated)${RESET}"
 fi
 printf "  ${DIM}%-14s${RESET} %s\n" "Access cards:" "$CSV"
+if [[ "$STUDENT_ACCESS" == "portal" ]]; then
+    printf "  ${DIM}%-14s${RESET} %s\n" "Join portal:"  "https://join.${BASE_HOST}/"
+    printf "  ${DIM}%-14s${RESET} %s\n" "QR screen:"    "https://join.${BASE_HOST}/present.html"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Portal admin:" "https://join.${BASE_HOST}/_/"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Admin secret:" "kubectl -n ${NAMESPACE} get secret join-portal-admin -o jsonpath='{.data.PB_ADMIN_PASSWORD}' | base64 -d"
+fi
 if [[ -f "$CSV" ]]; then
     echo ""
     head -6 "$CSV" | sed 's/^/  /'

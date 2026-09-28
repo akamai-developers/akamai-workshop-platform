@@ -6,6 +6,33 @@ end of deploy (and in `access-cards.csv`): `<lb-ip-dashed>.sslip.io` in no-domai
 
 ## Student issues
 
+### "The join portal is unavailable"
+
+```bash
+kubectl -n <ns> get deployment/join-portal service/join-portal ingress/join-portal pvc/join-portal-data
+kubectl -n <ns> get pods -l app=join-portal -o wide
+kubectl -n <ns> describe ingress/join-portal
+kubectl -n <ns> describe pvc/join-portal-data
+kubectl -n <ns> get events --sort-by=.lastTimestamp | tail -30
+kubectl -n <ns> logs deployment/join-portal
+kubectl -n <ns> get secret join-portal-slots
+```
+
+Check that the `join-portal-data` PVC is bound and the `join-portal-slots` Secret
+exists. If you can't get the portal working before class, hand out the printable
+cards or use `access-cards.csv`.
+
+### "I entered the wrong email" or "my slot is unavailable"
+
+Open `https://join.<base-host>/_/` and sign in as `admin@workshop.local` to correct
+the registration. You can delete an accidental claim only if nobody used its
+workspace. Otherwise, use the [per-slot reset](runbook.md#reclaim-a-used-workspace)
+before assigning it to someone else. Deleting the record alone leaves the old
+student's state and password behind. The [runbook](runbook.md) shows how to get
+the admin password from the `join-portal-admin` Secret. Once sign-up begins, don't
+reduce the workspace count: the portal will not automatically move an assignment
+whose slot no longer exists.
+
 ### "I can't connect to my workspace"
 
 1. Pod running? `kubectl -n <ns> get pod ws-NN`
