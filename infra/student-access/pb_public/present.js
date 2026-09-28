@@ -6,7 +6,7 @@
     text: joinUrl,
     width: 320,
     height: 320,
-    colorDark: "#10110f",
+    colorDark: "#002f6c",
     colorLight: "#ffffff",
     correctLevel: QRCode.CorrectLevel.H,
   })
