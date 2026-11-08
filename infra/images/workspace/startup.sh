@@ -207,7 +207,7 @@ fi
 if [ -f "${HOME}/.kube/config" ] && ! command -v kubectl >/dev/null 2>&1; then
   log "kubeconfig mounted but kubectl missing; installing kubectl into ~/.local/bin"
   mkdir -p "${HOME}/.local/bin"
-  KVER="$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo v1.34.0)"
+  KVER="$(curl -L -s https://dl.k8s.io/release/stable.txt 2>/dev/null || echo v1.37.2)"
   if curl -LsS "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl" -o "${HOME}/.local/bin/kubectl" 2>/dev/null \
        && chmod +x "${HOME}/.local/bin/kubectl"; then
     export PATH="${HOME}/.local/bin:${PATH}"

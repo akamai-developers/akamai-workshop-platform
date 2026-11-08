@@ -60,9 +60,12 @@ independent fences**; one without the other is a false sense of security.
 `infra/helm/templates/student-namespaces.yaml` renders, per student, a dedicated
 `Namespace` (`workshop-sNN`), a `student` `ServiceAccount`, and a **namespaced**
 `Role`/`RoleBinding`. The Role grants write on workload objects (pods, services,
-configmaps, secrets, pvcs, deployments, statefulsets, replicasets) plus
-`pods/portforward` and `pods/exec` — and **nothing cluster-scoped** (no `nodes`,
-`namespaces`, or RBAC verbs). So `kubectl get nodes`, `-n kube-system …`, and any other
+configmaps, pvcs, deployments, statefulsets, replicasets) plus `pods/portforward` and
+`pods/exec` — and **nothing cluster-scoped** (no `nodes`, `namespaces`, or RBAC verbs).
+It grants **no access to `secrets`**: the student namespace holds the replicated
+wildcard TLS key (`workshop-tls`) and the student's kubeconfig Secret, both of which
+reach pods through kubelet mounts, never through the student's token. No workshop lab
+needs Secret access (checked against the inference content repo, 2026-11-08). So `kubectl get nodes`, `-n kube-system …`, and any other
 student's namespace are all **Forbidden**; the student can act only inside their own
 namespace.
 
@@ -81,9 +84,12 @@ A namespace is an organizational/permissions boundary, **not** a network boundar
 **default-deny ingress** plus narrow allows: ingress-nginx → workspace:8080,
 workspace → own-namespace `vllm:8000`, and (with `agent_deploy`) ingress-nginx →
 agent:8080. Cross-namespace pod traffic is denied, so student A cannot reach student B's
-pods by IP. **Enforcement depends on the CNI** — LKE ships Cilium, which enforces it; an
-unenforced CNI makes this silently decorative (`tests/cilium-enforcement-check.sh` proves
-enforcement, `tests/phase3-isolation-check.sh` proves both fences end-to-end).
+pods by IP. **Enforcement depends on the CNI** — LKE's CNI enforces NetworkPolicy (Calico
+on the 1.37 clusters seen in November 2026; Cilium on earlier ones); an unenforced CNI
+makes this silently decorative (`tests/cilium-enforcement-check.sh` proves enforcement,
+`tests/phase3-isolation-check.sh` proves both fences end-to-end). The pre-workshop
+rehearsal on 2026-11-07 re-proved the data-plane fence live: a student's workspace could
+not reach another student's vLLM pod by IP.
 
 Egress stays open (`policyTypes: [Ingress]` only), exactly like the shared default-deny
 policy: in-notebook `kubectl` tunnels to the API server via egress, and the control plane
@@ -104,8 +110,12 @@ gets a separate bucket rather than one shared bucket with per-student prefixes.
   as a per-student Secret (`ws-NN-object-storage`) → env (`AWS_ACCESS_KEY_ID/SECRET`,
   `SESSION_BUCKET/ENDPOINT_URL/REGION`). The workspace pod (and, if enabled, the deployed
   agent) pull it in via `envFrom … optional: true`, so a missing Secret never blocks startup.
-- Bucket + key creation take the **region id** (e.g. `us-ord`, the `region` column of
-  `object-storage clusters-list`), not the cluster id (`us-ord-1`).
+- Buckets are created on **E3 endpoints only**, with `endpoint_type: E3`, and the S3
+  hostname is read back from the API (e.g. `us-ord-10.linodeobjects.com`), never guessed.
+  **`us-sea` is never used for storage** (it has no E3 endpoint and the account does not
+  use it for buckets); a `us-sea` GPU cluster keeps its buckets in `us-ord`. Both rules are
+  enforced in `infra/scripts/obj-storage-lib.sh` and preflighted by `deploy.sh` before
+  Terraform runs. All bucket and key calls go through the Linode REST API (no `linode-cli`).
 - The key id + secret live only in `infra/manifests/generated/object-storage.csv`
   (gitignored). Re-running preserves existing buckets/keys (the secret is unrecoverable
   after creation), like workspace passwords.

@@ -31,7 +31,7 @@ capacity-test: ## Measure students-per-replica for a model (Phase 6)
 refresh-content: ## Pull the latest content repo into every running student workspace (ARGS: --ref/--keep-edits/--namespace)
 	./infra/scripts/refresh-content.sh $(ARGS)
 
-mirror-models: ## Seed an Object Storage model mirror (one-time; avoids HF rate limits at scale). ARGS: --bucket NAME [--region us-sea]
+mirror-models: ## Seed an Object Storage model mirror (one-time; avoids HF rate limits at scale). ARGS: --bucket NAME [--region us-ord]  (E3 only; never us-sea)
 	./infra/scripts/mirror-models.sh $(ARGS)
 
 models: ## List the ungated model catalog

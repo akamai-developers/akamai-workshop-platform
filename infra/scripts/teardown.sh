@@ -80,6 +80,33 @@ else
     printf '%b\n' "  ${DIM}(--yes) proceeding without prompt.${RESET}"
 fi
 
+# ---------------------------------------------------------------------------
+# Token. `terraform destroy` reads $TF_VAR_token and nothing else. deploy.sh only
+# exports it on the deploy path, so `./deploy.sh teardown` with just $LINODE_TOKEN in
+# the shell stopped at Terraform's "No value for required variable" prompt and left
+# the cluster up (2026-11-08 rehearsal). Resolve it here the way deploy.sh does:
+# the first candidate the API accepts. No usable token: stop before touching anything.
+# ---------------------------------------------------------------------------
+_TOKEN_PICKED=""
+for _CAND_SRC in TF_VAR_token LINODE_TOKEN; do
+    _CAND="${!_CAND_SRC:-}"
+    [[ -n "$_CAND" ]] || continue
+    _HTTP="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+        -H "Authorization: Bearer ${_CAND}" https://api.linode.com/v4/profile || true)"
+    case "$_HTTP" in
+        200)     _TOKEN_PICKED="$_CAND"
+                 printf '%b\n' "  ${DIM}Linode token valid (from \$${_CAND_SRC}).${RESET}"; break ;;
+        401|403) printf '%b\n' "  ${YELLOW}token from \$${_CAND_SRC} rejected (HTTP ${_HTTP}); trying next source.${RESET}" ;;
+        *)       _TOKEN_PICKED="$_CAND"
+                 printf '%b\n' "  ${YELLOW}could not validate \$${_CAND_SRC} (HTTP '${_HTTP}'); continuing with it.${RESET}"; break ;;
+    esac
+done
+if [[ -z "$_TOKEN_PICKED" ]]; then
+    printf '%b\n' "  ${RED}ERROR: no usable Linode token in \$TF_VAR_token or \$LINODE_TOKEN. Nothing destroyed.${RESET}" >&2
+    exit 1
+fi
+export TF_VAR_token="$_TOKEN_PICKED"
+
 # Step 1: K8s cleanup (best-effort)
 if [ -f "${KUBECONFIG_PATH}" ]; then
     export KUBECONFIG="${KUBECONFIG_PATH}"
@@ -92,8 +119,34 @@ if [ -f "${KUBECONFIG_PATH}" ]; then
     kubectl -n "${NAMESPACE}" delete deployment agentgateway --ignore-not-found --timeout=60s 2>/dev/null || true
     kubectl -n "${NAMESPACE}" delete gateway agentgateway-proxy --ignore-not-found 2>/dev/null || true
     kubectl -n "${NAMESPACE}" delete httproute vllm-routing --ignore-not-found 2>/dev/null || true
+    # cluster_access=scoped: every student namespace (label awp-student=true) holds its
+    # own model-cache PVC. Deleting the LKE cluster does NOT delete the block-storage
+    # volumes behind PVCs, so delete those namespaces here (pods, then PVCs) and wait for
+    # the CSI driver to release the volumes before terraform destroys the cluster. Skipping
+    # this orphaned 89 unattached 50 GB volumes after the September 2026 classes.
+    _STUDENT_NS="$(kubectl get namespaces -l awp-student=true -o name 2>/dev/null | sed 's|^namespace/||' | tr '\n' ' ' || true)"
+    if [[ -n "${_STUDENT_NS// /}" ]]; then
+        echo "  deleting $(wc -w <<<"${_STUDENT_NS}" | tr -d ' ') student namespace(s) and their PVCs..."
+        for _ns in ${_STUDENT_NS}; do
+            kubectl -n "${_ns}" delete pvc --all --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        done
+        # shellcheck disable=SC2086
+        kubectl delete namespace ${_STUDENT_NS} --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    fi
     kubectl -n "${NAMESPACE}" delete pvc --all --ignore-not-found --timeout=120s || true
     kubectl delete namespace "${NAMESPACE}" --ignore-not-found --timeout=120s || true
+    # Wait (up to 10 min) for every PersistentVolume to be released and deleted, so the
+    # Linode CSI controller finishes deleting the backing volumes before the cluster goes.
+    for _i in $(seq 1 60); do
+        _PVS="$(kubectl get pv --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+        [[ "${_PVS}" == "0" ]] && break
+        [[ $((_i % 6)) -eq 0 ]] && echo "  waiting for ${_PVS} PersistentVolume(s) to be deleted..."
+        sleep 10
+    done
+    _PVS="$(kubectl get pv --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "${_PVS}" != "0" ]]; then
+        printf '%b\n' "  ${YELLOW}WARN: ${_PVS} PersistentVolume(s) still present; their block-storage volumes may outlive the cluster. Check Volumes at cloud.linode.com after teardown.${RESET}"
+    fi
 else
     printf '%b\n' "  ${DIM}No kubeconfig found; skipping K8s cleanup${RESET}"
 fi
@@ -102,12 +155,14 @@ fi
 # Revoke every per-student key + empty/delete every bucket prefixed by the run label.
 # Idempotent and prefix-filtered, so it is a safe no-op when object_storage was never
 # managed. The bucket prefix is the cluster label (deploy.sh passes --prefix "$LABEL").
-if [[ -n "$CLUSTER_LABEL" && -n "$CLUSTER_REGION" ]] && command -v linode-cli >/dev/null 2>&1; then
+# Buckets are matched in whatever region they live (they may not be in the cluster
+# region: us-sea clusters keep their buckets in us-ord). REST API only, no linode-cli.
+if [[ -n "$CLUSTER_LABEL" ]]; then
     echo ""
     printf '%b\n' "  ${BOLD}Step 1b: Object Storage cleanup${RESET}"
     env LINODE_CLI_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}" \
         "${SCRIPT_DIR}/provision-object-storage.sh" --teardown \
-        --region "$CLUSTER_REGION" --prefix "$CLUSTER_LABEL" \
+        --prefix "$CLUSTER_LABEL" \
         || printf '%b\n' "  ${DIM}(object-storage cleanup reported issues — verify in cloud.linode.com)${RESET}"
 fi
 
@@ -238,3 +293,13 @@ else
 fi
 rule
 echo ""
+
+# Exit status: 1 when the cluster survived (still billing), 2 when terraform reported
+# errors but the cluster is gone, 0 only when everything was destroyed. Callers and
+# automation must not read a failed teardown as success.
+if [[ -n "$_SURVIVOR" ]]; then
+    exit 1
+elif [[ "${TF_DESTROY_RC}" -ne 0 ]]; then
+    exit 2
+fi
+exit 0

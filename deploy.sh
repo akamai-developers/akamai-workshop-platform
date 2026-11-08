@@ -57,7 +57,8 @@ CPU_NODE_TYPE=""
 CPU_NODE_COUNT=""
 # Cluster / TLS knobs.
 LABEL=""                      # deployment name (Linode cluster label); default applied below
-K8S_VERSION="1.34"
+K8S_VERSION=""               # "" = auto: K8S_VERSION_DEFAULT if LKE still offers it, else the newest offered
+K8S_VERSION_DEFAULT="1.37"   # the version the platform was last rehearsed on (LKE retires old minors)
 SUBDOMAIN_PREFIX="workshop"
 CERT_EMAIL=""
 ALLOWED_CIDR="0.0.0.0/0"
@@ -83,6 +84,7 @@ GPU_SHARING=""       # none (default) | timeslicing; mps reserved/v2
 GPU_TIMESLICING_REPLICAS=""  # logical GPUs/card when gpu_sharing=timeslicing (default 2)
 CLUSTER_ACCESS=""    # none (default) | scoped
 OBJECT_STORAGE=""    # none (default) | managed
+OBJECT_STORAGE_REGION=""  # managed buckets' region (E3 only, never us-sea); "" = cluster region
 AGENT_DEPLOY=""      # none (default) | plain; kagent reserved/v2
 INFERENCE_ENDPOINT="" # inference=external only: user-supplied OpenAI-compatible URL
 INFERENCE_API_KEY=""  # inference=external only: bearer key for that endpoint
@@ -238,7 +240,8 @@ keys = {
  "model_mirror_access_key":"MODEL_MIRROR_ACCESS_KEY","model_mirror_secret_key":"MODEL_MIRROR_SECRET_KEY",
  "gpu_timeslicing_replicas":"GPU_TIMESLICING_REPLICAS",
  "cluster_access":"CLUSTER_ACCESS",
- "object_storage":"OBJECT_STORAGE","agent_deploy":"AGENT_DEPLOY",
+ "object_storage":"OBJECT_STORAGE","object_storage_region":"OBJECT_STORAGE_REGION",
+ "agent_deploy":"AGENT_DEPLOY",
  "inference_endpoint":"INFERENCE_ENDPOINT","inference_api_key":"INFERENCE_API_KEY",
  # Workshop preset (a named composition; see apply_preset). 'workshop' is an alias.
  "preset":"PRESET","workshop":"PRESET",
@@ -291,6 +294,7 @@ while [[ $# -gt 0 ]]; do
         --gpu-timeslicing-replicas) GPU_TIMESLICING_REPLICAS="$2"; shift 2 ;;
         --cluster-access)    CLUSTER_ACCESS="$2"; shift 2 ;;
         --object-storage)    OBJECT_STORAGE="$2"; shift 2 ;;
+        --object-storage-region) OBJECT_STORAGE_REGION="$2"; shift 2 ;;
         --agent-deploy)      AGENT_DEPLOY="$2"; shift 2 ;;
         --inference-endpoint) INFERENCE_ENDPOINT="$2"; shift 2 ;;
         --inference-api-key)  INFERENCE_API_KEY="$2"; shift 2 ;;
@@ -634,6 +638,25 @@ case "$OBJECT_STORAGE" in
     own-account) err "object_storage 'own-account' is reserved for v2 and not implemented yet." ;;
     *) err "object_storage must be 'none' or 'managed' (got '$OBJECT_STORAGE')" ;;
 esac
+# Object Storage policy: E3 endpoints only, never us-sea (this account does not use it for
+# storage; GPU nodes there are fine). Buckets default to the cluster region; a us-sea
+# cluster gets its buckets in us-ord unless --object-storage-region says otherwise. The
+# per-region E3 check against the API happens after the token check below.
+OBJ_DENY_REGIONS="us-sea"
+if [[ -n "$OBJECT_STORAGE_REGION" && " $OBJ_DENY_REGIONS " == *" $OBJECT_STORAGE_REGION "* ]]; then
+    err "object_storage_region '${OBJECT_STORAGE_REGION}' is not allowed for Object Storage (E3 endpoints only, never ${OBJ_DENY_REGIONS}). Use us-ord."
+fi
+if [[ "$OBJECT_STORAGE" == "managed" && -z "$OBJECT_STORAGE_REGION" ]]; then
+    if [[ " $OBJ_DENY_REGIONS " == *" $REGION "* ]]; then
+        OBJECT_STORAGE_REGION="us-ord"
+        warn "cluster region ${REGION} is not allowed for Object Storage; per-student buckets go to ${OBJECT_STORAGE_REGION} (override with --object-storage-region)."
+    else
+        OBJECT_STORAGE_REGION="$REGION"
+    fi
+fi
+if [[ -n "$MODEL_MIRROR_BUCKET" && " $OBJ_DENY_REGIONS " == *" $MODEL_MIRROR_REGION "* ]]; then
+    err "model mirror region '${MODEL_MIRROR_REGION}' is not allowed for Object Storage (E3 only, never ${OBJ_DENY_REGIONS}). Re-seed it: make mirror-models ARGS=\"--bucket ${MODEL_MIRROR_BUCKET} --region us-ord\""
+fi
 case "$AGENT_DEPLOY" in
     none|plain) ;;
     kagent) err "agent_deploy 'kagent' is reserved for v2 (Agent CRD + controller not built yet). Use 'plain'." ;;
@@ -818,7 +841,7 @@ if components_nondefault; then
         printf "  ${DIM}%-14s${RESET} %s\n" "GPU sharing:" "${GPU_SHARING} (${GPU_TIMESLICING_REPLICAS} logical GPUs/card)"
     fi
     printf "  ${DIM}%-14s${RESET} %s\n" "Cluster acc.:" "$CLUSTER_ACCESS"
-    printf "  ${DIM}%-14s${RESET} %s\n" "Object store:" "$OBJECT_STORAGE"
+    printf "  ${DIM}%-14s${RESET} %s\n" "Object store:" "${OBJECT_STORAGE}${OBJECT_STORAGE_REGION:+ (buckets in ${OBJECT_STORAGE_REGION}, E3)}"
     printf "  ${DIM}%-14s${RESET} %s\n" "Agent deploy:" "$AGENT_DEPLOY"
     echo ""
 fi
@@ -910,6 +933,74 @@ PY
 done
 [[ -n "$_TOKEN_PICKED" ]] || err "the Linode API rejected every token it was given (\$TF_VAR_token, \$LINODE_TOKEN). Recreate one at https://cloud.linode.com/profile/tokens — and if your shell profile exports a stale LINODE_TOKEN, update it."
 export TF_VAR_token="$_TOKEN_PICKED"
+
+# ---- Kubernetes version preflight ----
+# LKE retires old minors (1.34 vanished in late 2026 and terraform 400'd on it), so ask the
+# API what it offers. An explicit --k8s-version / k8s_version must be on that list; the
+# auto default prefers K8S_VERSION_DEFAULT and falls back to the newest offered version.
+_LKE_VERSIONS="$(python3 - "$TF_VAR_token" <<'PY'
+import json, sys, urllib.request
+req = urllib.request.Request("https://api.linode.com/v4/lke/versions?page_size=100",
+                             headers={"Authorization": "Bearer " + sys.argv[1]})
+try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+        ids = [v["id"] for v in json.load(r).get("data", [])]
+except Exception:
+    ids = []
+ids.sort(key=lambda s: [int(x) for x in s.split(".")], reverse=True)
+print(" ".join(ids))
+PY
+)"
+if [[ -z "$_LKE_VERSIONS" ]]; then
+    K8S_VERSION="${K8S_VERSION:-$K8S_VERSION_DEFAULT}"
+    warn "could not list LKE Kubernetes versions; proceeding with ${K8S_VERSION}."
+elif [[ -n "$K8S_VERSION" ]]; then
+    [[ " $_LKE_VERSIONS " == *" $K8S_VERSION "* ]] \
+        || err "Kubernetes ${K8S_VERSION} is not offered by LKE (offered: ${_LKE_VERSIONS}). Pass --k8s-version <offered>, or drop k8s_version from the config to auto-pick."
+    ok "Kubernetes ${K8S_VERSION} is offered by LKE"
+elif [[ " $_LKE_VERSIONS " == *" $K8S_VERSION_DEFAULT "* ]]; then
+    K8S_VERSION="$K8S_VERSION_DEFAULT"
+    ok "Kubernetes ${K8S_VERSION} (platform default) is offered by LKE"
+else
+    K8S_VERSION="${_LKE_VERSIONS%% *}"
+    warn "LKE no longer offers Kubernetes ${K8S_VERSION_DEFAULT}; using the newest offered version, ${K8S_VERSION}. Rehearse on it before a class."
+fi
+
+# ---- Object Storage preflight (E3 endpoints only) ----
+# Fail here, before terraform bills anything, if the bucket region has no E3 endpoint or a
+# sourced model-mirror.conf points at a non-E3 endpoint.
+if [[ "$OBJECT_STORAGE" == "managed" || -n "$MODEL_MIRROR_BUCKET" ]]; then
+    _OBJ_CHECK="$(python3 - "$TF_VAR_token" "$OBJECT_STORAGE" "$OBJECT_STORAGE_REGION" \
+                  "$MODEL_MIRROR_BUCKET" "$MODEL_MIRROR_ENDPOINT" "$MODEL_MIRROR_REGION" <<'PY'
+import json, sys, urllib.request
+token, managed, obj_region, mirror_bucket, mirror_ep, mirror_region = sys.argv[1:7]
+req = urllib.request.Request("https://api.linode.com/v4/object-storage/endpoints?page_size=500",
+                             headers={"Authorization": "Bearer " + token})
+try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+        eps = json.load(r).get("data", [])
+except Exception as e:
+    print(f"WARN could not list Object Storage endpoints ({e}); skipping the E3 preflight")
+    sys.exit(0)
+e3 = {r["region"]: (r.get("s3_endpoint") or "") for r in eps if r.get("endpoint_type") == "E3"}
+problems = []
+if managed == "managed" and obj_region not in e3:
+    problems.append(f"region '{obj_region}' has no E3 Object Storage endpoint (E3 regions: {', '.join(sorted(e3)) or 'none'}); set object_storage_region to one of them")
+if mirror_bucket:
+    host = mirror_ep.replace("https://", "").replace("http://", "").rstrip("/")
+    if mirror_region not in e3:
+        problems.append(f"model mirror region '{mirror_region}' has no E3 endpoint; re-seed with: make mirror-models ARGS=\"--bucket {mirror_bucket} --region us-ord\"")
+    elif e3[mirror_region] and host != e3[mirror_region]:
+        problems.append(f"model mirror endpoint '{host}' is not the E3 endpoint for {mirror_region} ({e3[mirror_region]}); re-seed with: make mirror-models ARGS=\"--bucket {mirror_bucket} --region {mirror_region}\"")
+print("\n".join(problems) if problems else "OK")
+PY
+)"
+    case "$_OBJ_CHECK" in
+        OK)    ok "Object Storage preflight: E3 endpoints confirmed" ;;
+        WARN*) warn "${_OBJ_CHECK#WARN }" ;;
+        *)     err "Object Storage preflight failed: ${_OBJ_CHECK}" ;;
+    esac
+fi
 
 # ---- Deployment-name preflight ----
 # LKE cluster and firewall labels are account-unique, and terraform 400s
@@ -1028,6 +1119,7 @@ gpu_sharing: ${GPU_SHARING}
 gpu_timeslicing_replicas: ${GPU_TIMESLICING_REPLICAS}
 cluster_access: ${CLUSTER_ACCESS}
 object_storage: ${OBJECT_STORAGE}
+object_storage_region: "${OBJECT_STORAGE_REGION}"
 agent_deploy: ${AGENT_DEPLOY}
 EOF
 )"
@@ -1183,7 +1275,7 @@ if [[ "$OBJECT_STORAGE" == "managed" ]]; then
     echo ""
     printf '%b\n' "  ${BOLD}Provisioning per-student Object Storage${RESET}"
     "${SCRIPTS}/provision-object-storage.sh" \
-        -n "$STUDENTS" --region "$REGION" --prefix "$LABEL" \
+        -n "$STUDENTS" --region "$OBJECT_STORAGE_REGION" --prefix "$LABEL" \
         --namespace "$NAMESPACE" --cluster-access "$CLUSTER_ACCESS"
 fi
 

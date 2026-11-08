@@ -3,7 +3,43 @@
 All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased — Component-based workshops (`feat/jupyter-own-inference`)
+## Unreleased — Pre-workshop hardening (2026-11-07)
+
+- **Kubernetes version preflight** (`deploy.sh`): LKE retired 1.34, the hardcoded default,
+  so `terraform apply` 400'd. `deploy.sh` now lists the versions LKE offers after the token
+  check, uses `1.37` (the rehearsed default) when offered, otherwise the newest offered
+  version with a warning, and rejects an explicit `--k8s-version` that is not on the list.
+- **Object Storage: E3 endpoints only, never `us-sea`.** New `infra/scripts/obj-storage-lib.sh`
+  (REST API via curl, no `linode-cli`, no boto3) creates every bucket with
+  `endpoint_type: E3`, reads the S3 hostname back from the API (`us-ord-10.linodeobjects.com`)
+  instead of guessing `<region>-1`, and refuses `us-sea`. `provision-object-storage.sh` and
+  `mirror-models.sh` use it; teardown finds each bucket's region from the API, retries
+  empty+delete (E3 can reject a freshly minted key for a few seconds), verifies the 404,
+  and exits non-zero with the keys and CSV kept when a bucket survives. New
+  `object_storage_region` config key / `--object-storage-region` flag (default: the cluster
+  region; a `us-sea` cluster uses `us-ord`). `deploy.sh` preflights both rules before Terraform.
+- **Teardown passes the token to Terraform and fails loudly.** `./deploy.sh teardown` with
+  only `$LINODE_TOKEN` in the shell used to stop at Terraform's "No value for required
+  variable" prompt and leave the cluster billing, while still exiting 0 (seen on the
+  2026-11-08 rehearsal teardown). `teardown.sh` now validates and exports `TF_VAR_token`
+  before destroying, exits 1 when the cluster survived and 2 on other Terraform errors.
+- **Teardown no longer orphans block storage.** `teardown.sh` deletes the per-student
+  namespaces (and their model-cache PVCs) and waits for the PersistentVolumes to go before
+  `terraform destroy`. Previously only the shared namespace's PVCs were deleted, which left
+  89 unattached 50 GB volumes after the September 2026 classes.
+- **Student Role no longer grants `secrets`.** In scoped mode every student namespace
+  holds the replicated wildcard TLS private key and the student's kubeconfig Secret; the
+  old Role let a student read both with `kubectl get secret`. No lab needs Secret access
+  (pods receive them via kubelet mounts), so the verb set is unchanged for everything else.
+- **PodSecurity `warn` label lowered to `baseline`** on the shared and per-student
+  namespaces (`enforce` stays `baseline`, `audit` stays `restricted`). vLLM runs as uid 0,
+  so `warn: restricted` printed a red PodSecurity warning on every `kubectl diff`/`apply`
+  cell in modules 5, 6 and 8. Seen during the 2026-11-08 rehearsal; no admission change.
+- `provision.sh`: exported kubeconfig is now `chmod 600`; fixed a doubled domain in the
+  Step 6 banner. Security doc: LKE 1.37 clusters run Calico, not Cilium.
+- `startup.sh` kubectl fallback bumped to v1.37.2; docs and example config updated.
+
+## Component-based workshops (`feat/jupyter-own-inference`)
 
 Extending the platform additively, behind flags that default to today's behaviour, so
 one classroom machinery composes multiple workshop shapes (PLAN.md). The default

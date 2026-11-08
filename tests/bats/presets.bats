@@ -149,3 +149,23 @@ EOF
   grep -q 'name: EMBEDDING_BASE_URL' "${OUT}/workspace-manifests.yaml"
   grep -q 'value: "BAAI/bge-large-en-v1.5"' "${OUT}/workspace-manifests.yaml"
 }
+
+# --- Object Storage policy: E3 endpoints only, never us-sea ----------------------
+
+@test "object_storage_region us-sea is refused (E3-only Object Storage policy)" {
+  dry --preset solution-architect-agent --students 2 --object-storage-region us-sea
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not allowed for Object Storage"* ]]
+}
+
+@test "a us-sea cluster with managed storage puts its buckets in us-ord" {
+  dry --preset solution-architect-agent --students 2 --region us-sea
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"buckets in us-ord"* ]]
+}
+
+@test "managed storage defaults its buckets to the cluster region when allowed" {
+  dry --preset solution-architect-agent --students 2 --region us-ord
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"buckets in us-ord, E3"* ]]
+}

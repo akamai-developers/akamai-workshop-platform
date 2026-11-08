@@ -6,7 +6,7 @@ delete a non-empty bucket, and `linode-cli obj` (the usual emptier) needs boto3,
 the platform does not require anywhere else. This signs requests with AWS Signature V4
 using urllib + hmac + hashlib, so the only dependency is python3.
 
-    s3.py empty   --endpoint https://us-sea-1.linodeobjects.com --region us-sea \
+    s3.py empty   --endpoint https://us-ord-10.linodeobjects.com --region us-ord \
                   --bucket NAME --access-key AK --secret-key SK
     s3.py put     ... --bucket NAME --key path/obj --data 'hello'   # used by the self-test
     s3.py list    ... --bucket NAME

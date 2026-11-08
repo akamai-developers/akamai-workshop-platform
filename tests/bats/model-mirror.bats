@@ -13,8 +13,8 @@ mirror_render() {
   helm template "${HELM_DIR}" --set inference=dedicated-vllm --set cluster_access=scoped \
     --set student_count=2 \
     --set model_mirror_bucket=acme-mirror \
-    --set model_mirror_endpoint=https://us-sea-1.linodeobjects.com \
-    --set model_mirror_region=us-sea \
+    --set model_mirror_endpoint=https://us-ord-10.linodeobjects.com \
+    --set model_mirror_region=us-ord \
     --set model_mirror_access_key=AKIA --set model_mirror_secret_key=SEKRET
 }
 
@@ -47,6 +47,12 @@ mirror_render() {
   run "${MIRROR}"
   [ "$status" -ne 0 ]
   [[ "$output" == *"--bucket is required"* ]]
+}
+
+@test "mirror-models.sh refuses us-sea for Object Storage (policy, offline)" {
+  run "${MIRROR}" --bucket acme-mirror --region us-sea
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not allowed for Object Storage"* ]]
 }
 
 @test "mirror-models.sh --help works offline" {

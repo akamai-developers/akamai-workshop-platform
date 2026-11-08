@@ -33,6 +33,8 @@ region:       us-ord                 # "" → wizard lists live GPU regions (see
 # gpu_timeslicing_replicas: 2         # logical GPUs/card when gpu_sharing: timeslicing (>= 2)
 # cluster_access:  none               # none (default) | scoped (per-student ns + kubeconfig + NetworkPolicy)
 # object_storage:  none               # none (default) | managed (per-student bucket + scoped key)
+# object_storage_region: us-ord       # E3 Object Storage region for managed buckets. Default: the cluster
+#                                     #   region; a us-sea cluster uses us-ord (buckets never go to us-sea)
 # agent_deploy:    none               # none (default) | plain (needs cluster_access: scoped). kagent = reserved/v2
 # inference_endpoint: ""              # REQUIRED for inference: external — OpenAI-compatible URL the workshop calls
 # inference_api_key:  ""              # optional bearer key for inference_endpoint (external only)
@@ -55,6 +57,6 @@ region:       us-ord                 # "" → wizard lists live GPU regions (see
 # --- Advanced ---
 # namespace:       workshop
 # label:           ai-agents-workshop   # deployment name → Linode cluster label (or pass --name)
-# k8s_version:     "1.34"
+# k8s_version:     "1.37"            # omit to auto-pick: 1.37 if LKE still offers it, else the newest offered
 # allowed_cidr:    0.0.0.0/0          # restrict ingress to a classroom CIDR
 # workspace_image: codercom/code-server:latest   # stock image + startup.sh ConfigMap (no Docker)

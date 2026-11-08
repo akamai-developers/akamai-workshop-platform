@@ -23,7 +23,10 @@ metadata:
     awp-student-number: "{{ $n }}"
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+    # warn stays at baseline (not restricted): the vLLM image runs as uid 0, so a
+    # restricted warn would print a PodSecurity warning on every kubectl diff/apply
+    # in the labs. enforce is the real gate; audit still records restricted gaps.
+    pod-security.kubernetes.io/warn: baseline
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -35,6 +38,10 @@ metadata:
     awp-student-number: "{{ $n }}"
 ---
 # Namespaced Role: manage your OWN namespace only. No cluster-scoped resources.
+# No `secrets`: the namespace holds the replicated wildcard TLS key (workshop-tls) and the
+# student's own kubeconfig Secret, and no lab needs Secret access (pods get them mounted
+# by the kubelet, not read through the student's token). Verified against the inference
+# content repo on 2026-11-08: module 9 ships a Deployment + Service only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -42,7 +49,7 @@ metadata:
   namespace: {{ $ns }}
 rules:
   - apiGroups: [""]
-    resources: [pods, pods/log, services, configmaps, secrets, persistentvolumeclaims, events]
+    resources: [pods, pods/log, services, configmaps, persistentvolumeclaims, events]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [""]
     resources: [pods/portforward, pods/exec]

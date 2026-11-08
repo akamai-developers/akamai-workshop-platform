@@ -9,10 +9,11 @@ set -euo pipefail
 # download the models locally (huggingface_hub) -> `aws s3 sync` them up -> write
 # infra/manifests/generated/model-mirror.conf so `make deploy` auto-uses the mirror.
 #
-# Requires: aws CLI (bulk upload), python3 + huggingface_hub (download), linode-cli,
-# and the operator token ($TF_VAR_token / $LINODE_TOKEN).
+# Requires: aws CLI (bulk upload), python3 + huggingface_hub (download), curl, and the
+# operator token ($TF_VAR_token / $LINODE_TOKEN). The bucket is created on an E3 endpoint
+# and never in us-sea (policy, see obj-storage-lib.sh).
 #
-#   make mirror-models ARGS="--bucket acme-model-mirror --region us-sea"
+#   make mirror-models ARGS="--bucket acme-model-mirror --region us-ord"
 #   make mirror-models ARGS="--bucket acme-model-mirror --models RedHatAI/Qwen3-4B-FP8-dynamic,Qwen/Qwen3-0.6B"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,14 +25,14 @@ GENERATED="${INFRA_DIR}/manifests/generated"
 # Durable: lives OUTSIDE generated/ so `make teardown` (rm -rf generated/) can't wipe the
 # mirror pointer/key while the mirror bucket itself survives. Auto-sourced by deploy.sh.
 CONF="${INFRA_DIR}/model-mirror.conf"
-LINODECLI="${LINODECLI:-linode-cli}"
-OBJ_API="${OBJ_API:-https://api.linode.com/v4/object-storage}"
+# shellcheck source=obj-storage-lib.sh
+source "${SCRIPT_DIR}/obj-storage-lib.sh"
 
 # Linode's S3 rejects the checksums recent aws-cli v2 adds by default; only send when needed.
 export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}"
 export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}"
 
-REGION="us-sea"
+REGION="us-ord"
 BUCKET=""
 PREFIX="hf-cache"
 MODELS="RedHatAI/Qwen3-4B-FP8-dynamic,RedHatAI/Qwen3-0.6B-FP8-dynamic,Qwen/Qwen3-0.6B"
@@ -45,7 +46,7 @@ while [[ $# -gt 0 ]]; do
         --models) MODELS="$2"; shift 2 ;;
         --skip-seed) SKIP_SEED=1; shift ;;
         -h|--help)
-            echo "usage: mirror-models.sh --bucket NAME [--region us-sea] [--prefix hf-cache] [--models a,b,c]"
+            echo "usage: mirror-models.sh --bucket NAME [--region us-ord] [--prefix hf-cache] [--models a,b,c]"
             echo "  Seeds an Object Storage model mirror and writes model-mirror.conf for deploy.sh."
             exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -64,6 +65,13 @@ if [[ "$SAFE_BUCKET" != "$BUCKET" ]]; then
 fi
 [[ "${#BUCKET}" -ge 3 ]] || { echo "ERROR: bucket name '${BUCKET}' is too short (min 3 chars after normalizing)." >&2; exit 1; }
 
+# Policy: never a bucket in us-sea (E3 endpoints only). Checked before any network or tool
+# check so the error is immediate and offline-testable.
+if obj_region_denied "$REGION"; then
+    echo "ERROR: region '${REGION}' is not allowed for Object Storage (policy: E3 endpoints only, never ${OBJ_DENY_REGIONS}). Use --region us-ord; GPU nodes may still run in ${REGION}." >&2
+    exit 1
+fi
+
 if [[ -z "${LINODE_CLI_TOKEN:-}" ]]; then export LINODE_CLI_TOKEN="${TF_VAR_token:-${LINODE_TOKEN:-}}"; fi
 [[ -n "${LINODE_CLI_TOKEN:-}" ]] || { echo "ERROR: set TF_VAR_token or LINODE_TOKEN." >&2; exit 1; }
 command -v "$PY" >/dev/null 2>&1 || { echo "ERROR: python not found (${PY})." >&2; exit 1; }
@@ -77,69 +85,45 @@ if [[ "$SKIP_SEED" -eq 0 ]]; then
     fi
 fi
 
-# Resolve the OS region id (us-sea) + cluster id (us-sea-1) -> endpoint (same as
-# provision-object-storage.sh: creation takes the region id; the endpoint uses the cluster id).
-JSON="$("${LINODECLI}" object-storage clusters-list --json 2>/dev/null || true)"
-read -r OBJ_REGION OBJ_CLUSTER_ID < <("$PY" - "$JSON" "$REGION" <<'PY'
-import json, sys
-want = sys.argv[2]
-try: data = json.loads(sys.argv[1])
-except Exception: data = []
-for c in data:
-    if c.get("region") == want:
-        print(c.get("region",""), c.get("id","")); break
-else:
-    for c in data:
-        if c.get("id") == want or str(c.get("id","")).startswith(want):
-            print(c.get("region",""), c.get("id","")); break
-PY
-)
-[[ -n "$OBJ_REGION" ]] || { echo "ERROR: region '$REGION' not in object-storage clusters-list (Object Storage enabled there?)." >&2; exit 1; }
-: "${OBJ_CLUSTER_ID:=$OBJ_REGION}"
-ENDPOINT="https://${OBJ_CLUSTER_ID}.linodeobjects.com"
+# Resolve the E3 endpoint for the region. The hostname comes from the API (us-ord-10...),
+# never from a guessed "<region>-1" cluster id.
+RESOLVED="$(obj_resolve_endpoint "$REGION")" || exit 1
+read -r OBJ_REGION OBJ_S3_ENDPOINT <<<"$RESOLVED"
+OBJ_S3_ENDPOINT="${OBJ_S3_ENDPOINT:-}"
 
-echo "=== Model mirror: bucket '$BUCKET' in $OBJ_REGION ($ENDPOINT) ==="
+echo "=== Model mirror: bucket '$BUCKET' in $OBJ_REGION (${OBJ_ENDPOINT_TYPE} endpoint) ==="
 
-# Create the bucket (region id, not cluster id). Idempotent: a bucket you already own 2xxs.
-resp="$(curl -s -w $'\n%{http_code}' -X POST "${OBJ_API}/buckets" \
-    -H "Authorization: Bearer ${LINODE_CLI_TOKEN}" -H "Content-Type: application/json" \
-    -d "{\"label\":\"${BUCKET}\",\"region\":\"${OBJ_REGION}\"}")"
-code="$(tail -n1 <<<"$resp")"; body="$(sed '$d' <<<"$resp")"
-case "$code" in
-    2*) echo "  bucket ready" ;;
-    *)  echo "ERROR: bucket create returned HTTP ${code}." >&2
-        echo "  API said: ${body}" >&2
-        echo "  (bucket names are GLOBAL — if it's taken, pick another; 400 usually = bad name/region)" >&2
-        exit 1 ;;
-esac
+# Create the E3 bucket. Idempotent: a bucket you already own 2xxs. The response carries
+# the real S3 endpoint for this region.
+EP="$(obj_create_bucket "$OBJ_REGION" "$BUCKET")" || {
+    echo "ERROR: bucket create failed (bucket names are GLOBAL — if it's taken, pick another)." >&2
+    exit 1
+}
+if [[ -n "$EP" ]]; then OBJ_S3_ENDPOINT="$EP"; fi
+if [[ -z "$OBJ_S3_ENDPOINT" ]]; then OBJ_S3_ENDPOINT="$(obj_bucket_field "$BUCKET" s3_endpoint)"; fi
+[[ -n "$OBJ_S3_ENDPOINT" ]] || { echo "ERROR: could not determine the ${OBJ_ENDPOINT_TYPE} S3 endpoint for ${BUCKET} in ${OBJ_REGION}." >&2; exit 1; }
+ENDPOINT="https://${OBJ_S3_ENDPOINT}"
+echo "  bucket ready at ${ENDPOINT}"
 
 # Mint a read_write key (upload) and a read_only key (pods), both scoped to this bucket.
 mint_key() {  # $1=label $2=permissions -> "ACCESS_KEY SECRET_KEY"
-    local j existing kid
+    local kid ak sk
     # Drop any prior key with this exact label so retries don't accumulate orphans.
-    existing="$("${LINODECLI}" object-storage keys-list --json 2>/dev/null || true)"
-    for kid in $("$PY" - "$existing" "$1" <<'PY'
-import json, sys
-try: data = json.loads(sys.argv[1])
-except Exception: data = []
-for k in data:
-    if str(k.get("label", "")) == sys.argv[2]:
-        print(k.get("id", ""))
-PY
-); do
-        [[ -n "$kid" ]] && "${LINODECLI}" object-storage keys-delete "$kid" >/dev/null 2>&1 || true
-    done
-    j="$("${LINODECLI}" object-storage keys-create --label "$1" --regions "$OBJ_REGION" \
-        --bucket_access.region "$OBJ_REGION" --bucket_access.bucket_name "$BUCKET" \
-        --bucket_access.permissions "$2" --json 2>/dev/null || true)"
-    "$PY" - "$j" <<'PY'
+    for kid in $(obj_py "$(obj_list_keys)" '
 import json, sys
 try:
-    d = json.loads(sys.argv[1]); k = d[0] if isinstance(d, list) else d
-    print(k.get("access_key",""), k.get("secret_key",""))
+    parsed = json.load(sys.stdin)
+    data = parsed.get("data", []) if isinstance(parsed, dict) else parsed
 except Exception:
-    print("", "")
-PY
+    data = []
+for k in data:
+    if str(k.get("label", "")) == sys.argv[1]:
+        print(k.get("id", ""))
+' "$1"); do
+        if [[ -n "$kid" ]]; then obj_delete_key "$kid"; fi
+    done
+    read -r _ ak sk <<<"$(obj_create_key "$1" "$OBJ_REGION" "$BUCKET" "$2")"
+    printf '%s %s\n' "${ak:-}" "${sk:-}"
 }
 # Pods only ever need the read-only key.
 read -r AK_RO SK_RO < <(mint_key "${BUCKET}-ro" read_only)
@@ -174,6 +158,7 @@ mkdir -p "$(dirname "$CONF")"
 MODEL_MIRROR_BUCKET="${BUCKET}"
 MODEL_MIRROR_ENDPOINT="${ENDPOINT}"
 MODEL_MIRROR_REGION="${OBJ_REGION}"
+MODEL_MIRROR_ENDPOINT_TYPE="${OBJ_ENDPOINT_TYPE}"
 MODEL_MIRROR_PREFIX="${PREFIX}"
 MODEL_MIRROR_ACCESS_KEY="${AK_RO}"
 MODEL_MIRROR_SECRET_KEY="${SK_RO}"

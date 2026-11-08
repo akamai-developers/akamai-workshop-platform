@@ -11,9 +11,9 @@ variable "region" {
 }
 
 variable "k8s_version" {
-  description = "Kubernetes version"
+  description = "Kubernetes version. LKE retires old minors; deploy.sh checks this against the versions LKE offers and falls back to the newest one."
   type        = string
-  default     = "1.34"
+  default     = "1.37"
 }
 
 variable "label" {

@@ -12,15 +12,35 @@ if [[ -n "${FAKE_CURL_FAIL:-}" ]]; then
   exit "${FAKE_CURL_FAIL}"
 fi
 
-# Object Storage bucket REST API (provision-object-storage.sh):
-#   create_bucket   → `curl -w %{http_code}` expects an HTTP status back
-#   list_buckets    → GET .../buckets?... expects the buckets JSON
-#   delete_bucket   → DELETE, output discarded
+# Object Storage REST API (obj-storage-lib.sh). Every call there uses
+# `-w '\n%{http_code}'`, so the fake answers with a canned body, a newline, and the
+# status code. Canned JSON is hoisted into variables because a literal `}` inside a
+# ${VAR:-default} word ends the expansion early and corrupts the JSON.
+# Default endpoints: us-ord is E3 (the policy's happy path); us-sea/us-iad are E1 only.
+DEF_ENDPOINTS='[{"region":"us-ord","endpoint_type":"E3","s3_endpoint":"us-ord-10.linodeobjects.com"},{"region":"us-sea","endpoint_type":"E1","s3_endpoint":"us-sea-1.linodeobjects.com"},{"region":"us-iad","endpoint_type":"E1","s3_endpoint":"us-iad-10.linodeobjects.com"}]'
+DEF_BUCKET_CREATE='{"label":"fake-bucket","region":"us-ord","endpoint_type":"E3","s3_endpoint":"us-ord-10.linodeobjects.com"}'
+DEF_KEY_CREATE='{"id":4242,"access_key":"FAKEACCESS","secret_key":"FAKESECRET"}'
+
 args="$*"
-if [[ "$args" == *"%{http_code}"* ]]; then
-  printf '%s' "${FAKE_CURL_HTTP_CODE:-200}"
+body="${FAKE_CURL_OUT:-}"
+code="${FAKE_CURL_HTTP_CODE:-200}"
+if [[ "$args" == *"object-storage/endpoints"* ]]; then
+  body="${FAKE_OBJ_ENDPOINTS:-$DEF_ENDPOINTS}"
+elif [[ "$args" == *"-X POST"* && "$args" == *"object-storage/buckets"* ]]; then
+  body="${FAKE_OBJ_BUCKET_CREATE:-$DEF_BUCKET_CREATE}"
 elif [[ "$args" == *"object-storage/buckets?"* ]]; then
-  printf '%s' "${FAKE_OBJ_BUCKETS:-[]}"
+  body="${FAKE_OBJ_BUCKETS:-[]}"
+elif [[ "$args" == *"-X GET"* && "$args" == *"object-storage/buckets/"* ]]; then
+  # Single-bucket GET after a delete: the bucket is gone (teardown's verify step).
+  code="${FAKE_OBJ_BUCKET_GET_CODE:-404}"
+elif [[ "$args" == *"-X POST"* && "$args" == *"object-storage/keys"* ]]; then
+  body="${FAKE_OBJ_KEY_CREATE:-$DEF_KEY_CREATE}"
+elif [[ "$args" == *"object-storage/keys?"* ]]; then
+  body="${FAKE_OBJ_KEYS:-[]}"
+fi
+
+if [[ "$args" == *"%{http_code}"* ]]; then
+  printf '%s\n%s' "$body" "$code"
 else
-  printf '%s' "${FAKE_CURL_OUT:-}"
+  printf '%s' "$body"
 fi

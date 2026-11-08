@@ -6,4 +6,7 @@ metadata:
     app: akamai-workshop-platform
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/audit: restricted
-    pod-security.kubernetes.io/warn: restricted
+    # warn stays at baseline (not restricted): the vLLM image runs as uid 0, so a
+    # restricted warn would print a PodSecurity warning on every kubectl diff/apply
+    # in the labs. enforce is the real gate; audit still records restricted gaps.
+    pod-security.kubernetes.io/warn: baseline

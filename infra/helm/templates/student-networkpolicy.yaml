@@ -1,8 +1,9 @@
 {{- /*
 cluster_access: scoped — the data-plane fence. A namespace is NOT a network boundary,
 so each student namespace gets its own default-deny-ingress plus narrow allows. This
-stops student A's pods from sending packets to student B's pods (enforced by Cilium on
-LKE; an unenforced CNI makes this silently decorative — see tests/cilium-enforcement-check.sh).
+stops student A's pods from sending packets to student B's pods (enforced by LKE's CNI:
+Calico on 1.37 clusters, Cilium on older ones; an unenforced CNI makes this silently
+decorative — see tests/cilium-enforcement-check.sh).
 
 Egress is intentionally left open (policyTypes: [Ingress] only), exactly like the shared
 default-deny policy: in-notebook kubectl tunnels to the API server via egress, so an

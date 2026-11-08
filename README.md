@@ -163,7 +163,8 @@ the original platform.
 | `gpu_sharing` | `none` \| `timeslicing` | NVIDIA time-slicing so two vLLMs share one card (the [two-models lab](infra/docs/gpu-sharing.md)); needs `dedicated-vllm` |
 | `gpu_timeslicing_replicas` | `2` | Logical GPUs advertised per physical card when `gpu_sharing: timeslicing` (must be >= 2) |
 | `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |
-| `object_storage` | `none` \| `managed` | Per-student bucket + bucket-scoped key |
+| `object_storage` | `none` \| `managed` | Per-student bucket + bucket-scoped key, created on an **E3** Object Storage endpoint |
+| `object_storage_region` | cluster region | Region for managed buckets. Must have an E3 endpoint (for example `us-ord`). Buckets never go to `us-sea`; a `us-sea` cluster uses `us-ord` unless you set this |
 | `agent_deploy` | `none` \| `plain` | Ship the student's agent to their namespace (requires `cluster_access: scoped`) |
 
 ```yaml
@@ -205,7 +206,9 @@ for the design.
 ### Large classes & operations
 
 - **Beyond 100 students.** LKE caps a single node pool at 100 nodes; the GPU pool is automatically split into ≤100-node pools that share the `pool=gpu` label, so a 200-student `dedicated-vllm` class provisions in one cluster.
-- **Model mirror (avoid Hugging Face throttling).** At large scale, every per-student vLLM pulling from huggingface.co at once gets rate-limited (`SlowDown`). Seed an in-region Object Storage mirror once — `make mirror-models ARGS="--bucket <globally-unique-name> --region <region>"` — and `make deploy` auto-uses it (pods `aws s3 sync` from the bucket with adaptive-retry backoff). See [`infra/docs/ai-inference-workshop.md`](infra/docs/ai-inference-workshop.md).
+- **Model mirror (avoid Hugging Face throttling).** At large scale, every per-student vLLM pulling from huggingface.co at once gets rate-limited (`SlowDown`). Seed an Object Storage mirror once — `make mirror-models ARGS="--bucket <globally-unique-name> --region us-ord"` — and `make deploy` auto-uses it (pods `aws s3 sync` from the bucket with adaptive-retry backoff). See [`infra/docs/ai-inference-workshop.md`](infra/docs/ai-inference-workshop.md).
+- **Object Storage policy: E3 endpoints only, never `us-sea`.** Every bucket the platform creates (per-student buckets, the model mirror) is created with `endpoint_type: E3` and its S3 hostname is read back from the API (for example `us-ord-10.linodeobjects.com`). `us-sea` has no E3 endpoint and is not used for storage on this account; GPU nodes in `us-sea` are fine, and such a cluster keeps its buckets in `us-ord`. `deploy.sh` checks both rules against the API before Terraform runs.
+- **Kubernetes version.** LKE retires old minors. `deploy.sh` asks the API which versions are offered, uses `1.37` when it is still offered, and otherwise falls back to the newest one with a warning. Pin with `--k8s-version` or `k8s_version:` only if you need to.
 - **Refresh content on running pods.** After pushing to the content repo, `make refresh-content` pulls the latest into every running workspace — no redeploy, no pod recreation.
 
 ## Cost

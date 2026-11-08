@@ -125,6 +125,7 @@ terraform apply -auto-approve
 echo ""
 echo "--- Step 2: Export kubeconfig ---"
 terraform output -raw kubeconfig | base64 -d > "${KUBECONFIG_PATH}"
+chmod 600 "${KUBECONFIG_PATH}"   # cluster-admin credential; keep it owner-only
 export KUBECONFIG="${KUBECONFIG_PATH}"
 echo "Kubeconfig written to ${KUBECONFIG_PATH}"
 
@@ -307,7 +308,7 @@ fi
 #   empty  → self-signed wildcard for *.<base_host> (openssl, no lego/DNS)
 #   set    → Let's Encrypt wildcard via lego + Linode DNS-01
 echo ""
-echo "--- Step 6: Issue wildcard TLS cert (${DOMAIN:+domain: $DOMAIN}${DOMAIN:-no-domain / self-signed}) ---"
+echo "--- Step 6: Issue wildcard TLS cert (${DOMAIN:+domain: }${DOMAIN:-no-domain / self-signed}) ---"
 if kubectl -n "${NAMESPACE}" get secret workshop-tls >/dev/null 2>&1; then
     echo "  ✓ workshop-tls already exists; skipping (re-issue with ./scripts/issue-cert.sh)"
 elif DOMAIN="${DOMAIN:-}" SUBDOMAIN_PREFIX="${_PREFIX}" EMAIL="${CERT_EMAIL:-}" \
