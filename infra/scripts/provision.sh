@@ -119,7 +119,30 @@ except Exception:
 PY
 fi
 
-terraform apply -auto-approve
+# Plan first and refuse to apply a plan that destroys the cluster or a node pool.
+# A deploy (or a re-run after a partial failure) must only add or update. On 2026-11-08
+# a re-deploy deleted a 25-node GPU pool; whatever produced that plan, the apply should
+# have stopped. Set AWP_ALLOW_DESTROY=1 to override on purpose. teardown.sh is unaffected.
+terraform plan -input=false -out=tfplan.bin
+_DESTROYS="$(terraform show -json tfplan.bin | python3 -c '
+import json, sys
+plan = json.load(sys.stdin)
+for rc in plan.get("resource_changes", []):
+    if rc.get("type") in ("linode_lke_cluster", "linode_lke_node_pool") \
+       and "delete" in rc.get("change", {}).get("actions", []):
+        print(rc["address"], "->", "/".join(rc["change"]["actions"]))
+')"
+if [[ -n "$_DESTROYS" && "${AWP_ALLOW_DESTROY:-0}" != "1" ]]; then
+    echo "" >&2
+    echo "ERROR: this deploy would destroy infrastructure:" >&2
+    printf '  %s\n' $_DESTROYS >&2
+    echo "  A deploy never deletes a cluster or node pool. Inspect with 'terraform plan' in" >&2
+    echo "  $(pwd). If the destroy is intended, re-run with AWP_ALLOW_DESTROY=1." >&2
+    rm -f tfplan.bin
+    exit 1
+fi
+terraform apply -input=false tfplan.bin
+rm -f tfplan.bin
 
 # Step 2: Kubeconfig
 echo ""
@@ -270,19 +293,38 @@ echo "    (First start: 5-10 min while each replica downloads the model to its P
 if [ "${INFERENCE}" = "dedicated-vllm" ]; then
     # Per-student dedicated vLLM: one Deployment named 'vllm' in each student
     # namespace (<namespace>-sNN), created by generate-pods.sh in scoped mode.
-    for i in $(seq 1 "${STUDENT_COUNT}"); do
-        SNS="${NAMESPACE}-s$(printf '%02d' "$i")"
-        echo "  Waiting for vllm in ${SNS}..."
-        # 1800s matches the Deployment progressDeadlineSeconds (cold first-start download).
-        # On failure, dump diagnostics BEFORE returning so a torn-down cluster is still debuggable.
-        if ! kubectl -n "${SNS}" rollout status deployment/vllm --timeout=1800s; then
-            echo "  vLLM in ${SNS} did not become ready — diagnostics:" >&2
-            kubectl -n "${SNS}" get pods -o wide 2>&1 | sed 's/^/    /' || true
-            kubectl -n "${SNS}" describe deployment/vllm 2>&1 | tail -25 | sed 's/^/    /' || true
-            kubectl -n "${SNS}" logs deploy/vllm --tail=60 2>&1 | sed 's/^/    /' || true
-            kubectl -n "${SNS}" get events --sort-by=.lastTimestamp 2>&1 | tail -20 | sed 's/^/    /' || true
-            exit 1
+    # All students start at once, so wait for all of them under ONE deadline instead of
+    # 30 min each in sequence. A single slow node (late GPU node, Docker Hub pull timeouts,
+    # Hugging Face throttling) must not abort the deploy: the cert and the workspaces do
+    # not depend on it. Stragglers are reported loudly and the deploy carries on.
+    VLLM_WAIT_SECONDS="${VLLM_WAIT_SECONDS:-2700}"
+    _deadline=$(( $(date +%s) + VLLM_WAIT_SECONDS ))
+    _ready=0; _pending=""
+    while :; do
+        _ready=0; _pending=""
+        for i in $(seq 1 "${STUDENT_COUNT}"); do
+            SNS="${NAMESPACE}-s$(printf '%02d' "$i")"
+            _avail="$(kubectl -n "${SNS}" get deployment/vllm -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+            if [[ "${_avail:-0}" -ge 1 ]]; then _ready=$((_ready + 1)); else _pending="${_pending} ${SNS}"; fi
+        done
+        echo "  vLLM ready: ${_ready}/${STUDENT_COUNT}$( [[ -n "$_pending" ]] && echo "  (waiting on:${_pending})" )"
+        [[ "$_ready" -eq "$STUDENT_COUNT" ]] && break
+        if [[ "$(date +%s)" -ge "$_deadline" ]]; then
+            echo "" >&2
+            echo "  ############################################################################" >&2
+            echo "  ! ${_ready}/${STUDENT_COUNT} vLLMs ready after ${VLLM_WAIT_SECONDS}s. Still starting:${_pending}" >&2
+            echo "  ! Continuing with TLS and workspaces. These students' notebooks will fail" >&2
+            echo "  ! inference calls until their vLLM is Running. Check with:" >&2
+            echo "  !     kubectl get deploy -A -l app=vllm" >&2
+            echo "  ############################################################################" >&2
+            for SNS in $_pending; do
+                echo "  --- ${SNS} ---" >&2
+                kubectl -n "${SNS}" get pods -o wide 2>&1 | sed 's/^/    /' >&2 || true
+                kubectl -n "${SNS}" get events --sort-by=.lastTimestamp 2>&1 | tail -8 | sed 's/^/    /' >&2 || true
+            done
+            break
         fi
+        sleep 30
     done
 elif [ "${MULTI_MODEL}" -eq 0 ]; then
     kubectl -n "${NAMESPACE}" rollout status statefulset/vllm --timeout=900s

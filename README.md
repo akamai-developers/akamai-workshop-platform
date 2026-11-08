@@ -1,239 +1,118 @@
 # akamai-workshop-platform
 
-`akamai-workshop-platform` provisions a per-student GPU workshop classroom on [Akamai Cloud](https://www.linode.com/) (Linode LKE) with one interactive wizard, then tears it down with one command. The platform provides the core infrastructure: per-student browser IDEs ([code-server](https://github.com/coder/code-server) or JupyterLab), GPU [vLLM](https://github.com/vllm-project/vllm) inference, student URLs and passwords, TLS, and Kubernetes networking. You pick a workshop (or point it at any content repo), answer about seven questions, confirm a cost preview, and get a running classroom plus a CSV of student URLs and passwords.
+Provision a GPU classroom on [Akamai Cloud](https://www.linode.com/) with one command, hand each student a URL and a password, and tear it all down when class ends.
 
-The wizard offers ready-made workshops as presets — the interactive default is the [Solution Architect Agent](https://github.com/akamai-developers/akamai-workshop-solution-architect-agent) (JupyterLab); the [AI-agents workshop](https://github.com/akamai-developers/ai-agents-workshop) is another. The platform is content-agnostic — any content repo works.
-
-## Prerequisites
-
-**Account:**
-
-- Create an [Akamai Cloud account](http://login.linode.com/signup?promo=akm-dev-git-300-31126-M055) with an API token (includes free credit). Export the token before you deploy: `export TF_VAR_token="your-linode-api-token"`. The wizard reads it from `$TF_VAR_token` or `$LINODE_TOKEN` — the two are interchangeable and you only need one. If both are set, each is checked against the Linode API and the first working token wins (`$TF_VAR_token` preferred), so a stale token left in your shell profile is skipped instead of breaking the deploy. The token is never written to a file. Scopes: easiest is full access; the minimum is Read/Write on Kubernetes, Linodes, Firewalls, NodeBalancers, Volumes, and (domain mode) Domains.
-
-**Tools:**
-
-- [Terraform](https://terraform.io) version 1.5 or later
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [Helm](https://helm.sh/) version 3 or later (renders the chart on every deploy)
-- `bash`, `python3`, and `openssl`, which are standard on macOS and Linux
-
-You do not need a HuggingFace token, because the model menu is ungated only. You do not need Docker or a registry login.
-
-## Architecture
+Every student gets a browser IDE (JupyterLab or [code-server](https://github.com/coder/code-server)), a [vLLM](https://github.com/vllm-project/vllm) model served on GPUs, a copy of the workshop content, and their own HTTPS URL. You pick a workshop, confirm the cost, and get a CSV of student URLs and passwords.
 
 <p align="center">
   <img src="infra/docs/architecture.png" alt="akamai-workshop-platform architecture" width="400">
 </p>
 
-## What it does
+## Workshops
 
-- **Self-service:** an interactive wizard collects the deployment name, student count, workshop preset, model, content repo, domain, and region.
-- **Workshop presets:** the wizard's "Workshop" step bundles a content repo + editor + model + component composition into one pick. The default is the **Solution Architect Agent** (JupyterLab, `Qwen/Qwen2.5-7B-Instruct`); other presets are `ai-agents` (the original code-server workshop) and `own-inference`. Pick non-interactively with `--preset <name>`.
-- **Autopilot sizing:** the wizard picks the GPU plan, tensor-parallel size, and replica and node counts from the student count and model, then shows a `$/hr` and class-cost preview before anything bills.
-- **Content-agnostic:** the platform clones your `content_repo` into each workspace at pod startup, with no image rebuild and no registry login. See [`examples/README.md`](examples/README.md).
-- **Domain-optional:** with no domain, the platform uses `sslip.io` hostnames and self-signed TLS (the default). With a domain, it uses Linode DNS and a Let's Encrypt wildcard certificate.
-- **Live region and capacity check:** the wizard discovers GPU-capable regions and validates GPU capacity before provisioning, so a capacity shortage never leaves a partially built cluster that keeps billing.
-- **Private inference:** vLLM and the multi-model agentgateway stay cluster-internal behind ClusterIP services and a default-deny NetworkPolicy. Off-cluster access uses `kubectl port-forward` only, with no public endpoint. Multi-model deployments also require an API key on the gateway.
+Three workshops ship as presets. A preset sets the content repo, editor, model, and cluster shape in one pick.
+
+| Preset | Content | Editor | Inference | Model | 20 students, 4 hours |
+|---|---|---|---|---|---|
+| `solution-architect-agent` | [akamai-workshop-solution-architect-agent](https://github.com/akamai-developers/akamai-workshop-solution-architect-agent) | JupyterLab | One shared vLLM. Each student also gets a namespace, a kubeconfig, and an Object Storage bucket | Qwen/Qwen2.5-7B-Instruct | about $10 |
+| `ai-agents` | [ai-agents-workshop](https://github.com/akamai-developers/ai-agents-workshop) | code-server | One shared vLLM | Qwen/Qwen3-8B-FP8 | about $10 |
+| `own-inference` | [akamai-workshop-ai-inference](https://github.com/akamai-developers/akamai-workshop-ai-inference) | JupyterLab | One vLLM per student on its own GPU, which the student tunes with kubectl | Qwen/Qwen3-4B | about $43 |
+
+Costs are the node prices from `./deploy.sh --dry-run` and cover nodes only. The NodeBalancer and student volumes add a few dollars a day. The platform clones any git repo into the workspaces, so your own content works too. See [`examples/README.md`](examples/README.md).
+
+## Prerequisites
+
+- An [Akamai Cloud account](http://login.linode.com/signup?promo=akm-dev-git-300-31126-M055) and an API token. The token needs Read/Write on Kubernetes, Linodes, Firewalls, NodeBalancers, Volumes, and Object Storage, plus Domains if you bring a domain.
+- [Terraform](https://terraform.io) 1.5 or later, [kubectl](https://kubernetes.io/docs/tasks/tools/), and [Helm](https://helm.sh/) 3.
+- `bash`, `python3`, and `openssl`. All three come with macOS and Linux.
+
+You do not need a Hugging Face token. Every model in the catalog is ungated. You do not need Docker.
+
+Export the token as `LINODE_TOKEN` or `TF_VAR_token`. Either name works. If both are set, the deploy tests each against the API and uses the first one that works. The token is never written to a file.
 
 ## Quick start
 
-This path uses no domain, so the platform serves `sslip.io` hostnames with self-signed TLS.
-
 ```bash
-export TF_VAR_token="your-linode-api-token"
+export LINODE_TOKEN="your-linode-api-token"
 
-# See the plan and cost first. This creates nothing:
-./deploy.sh --dry-run --students 80 --model Qwen/Qwen3-8B-FP8
+# 1. Preview the plan and the cost. This creates nothing.
+./deploy.sh --dry-run --preset own-inference --students 20
 
-# Interactive: asks for name, class size, workshop, model, content repo, domain,
-# and region, shows a cost preview, provisions the classroom, writes access-cards.csv:
-make deploy            # or: ./deploy.sh
+# 2. Deploy. The wizard asks for a name, class size, workshop, model, domain,
+#    and region, then shows the cost and waits for a yes before it creates anything.
+./deploy.sh
 
-# Tear it down when class ends. This stops billing:
-make teardown          # or: ./deploy.sh teardown
+# 3. Hand out access.
+cat infra/manifests/generated/access-cards.csv        # student_number, url, password
+./infra/scripts/print-access-cards.sh                 # printable HTML, one card per student
+
+# 4. Tear down when class ends. This stops billing.
+./deploy.sh teardown
 ```
 
-After the deploy finishes, you can view student URLs and passwords in three ways:
+> [!WARNING]
+> GPU nodes bill by the hour. Run `./deploy.sh teardown` as soon as class ends, then check that the cluster is gone in Cloud Manager.
 
-```bash
-# View the raw CSV
-cat infra/manifests/generated/access-cards.csv
+A deploy takes 20 to 30 minutes. The `own-inference` shape takes longer because every student's vLLM downloads its models.
 
-# Generate printable HTML cards (one per student, ready to cut and hand out)
-./infra/scripts/print-access-cards.sh
-open infra/manifests/generated/access-cards.html
-```
-
-The CSV contains one row per student with `student_number`, `url`, and `password` columns.
-
-For non-interactive runs (CI or scripted), copy `config.example.yaml` to `config.yaml`, edit it, then run:
+For scripted runs, copy `config.example.yaml` to `config.yaml`, edit it, and run:
 
 ```bash
 ./deploy.sh --yes --config config.yaml
 ```
 
-Run `make help` to list every front-door target.
+`make help` lists the Makefile wrappers for the same commands.
 
-!!! warning
-    GPU nodes bill by the hour. Always run `make teardown` (or `./deploy.sh teardown`) when class ends, so the cluster stops billing.
+## Domains and TLS
 
-## Inputs
-
-These inputs are the entire user surface. Anything you omit is filled by the wizard's autopilot (and a `preset` fills the editor/model/content/components for you).
-
-| Input | Default | Meaning |
-|---|---|---|
-| `name` (config key: `label`) | `ai-agents-workshop` | Deployment name; becomes the Linode cluster label. CLI: `--name`/`--label`; in `config.yaml` the key is `label` (a `name:` line is ignored) |
-| `students` | `80` | Number of student workspaces to create |
-| `preset` (`--preset`/`--workshop`) | `solution-architect-agent` (interactive) | A named workshop = content + editor + model + components in one pick. Presets: `solution-architect-agent`, `ai-agents`, `own-inference`, `custom`. Only fills values you leave unset, so explicit keys still win. The non-interactive (`--yes`) default applies **no** preset, keeping the original platform shape. |
-| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated HuggingFace model id, or comma-separated ids for multi-model (e.g. `"Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"`). The Solution Architect Agent preset uses `Qwen/Qwen2.5-7B-Instruct`. Add `BAAI/bge-large-en-v1.5` for 1024-dim RAG embeddings. Run `make models` to list the catalog, or type `list` at the wizard's model prompt. |
-| `content_repo` | `""` | Git repo cloned into each workspace at startup. Blank uses `akamai-developers/ai-agents-workshop`. Also accepts a full git URL, `owner/repo`, or a bare repo name. |
-| `domain` | `""` (no domain) | Empty uses `sslip.io` and self-signed TLS. A value uses Linode DNS and Let's Encrypt. |
-| `region` | nearest GPU region | Chosen from the live list of GPU-capable Akamai regions |
-
-Workspaces are wired with the inference endpoint under **both** naming conventions — `VLLM_HOST`/`MODEL_NAME` (the platform's) and `VLLM_BASE_URL`/`VLLM_MODEL_ID` (what the Solution Architect Agent notebooks read) — so content that uses either set connects with no student configuration. When an embedding model is deployed, `EMBEDDING_BASE_URL`/`EMBEDDING_MODEL_ID` are injected too.
-
-## TLS and domains
-
-The preferred method is to bring your own domain. When you provide a domain, the platform creates Linode DNS records and provisions a free Let's Encrypt wildcard certificate automatically. Students get trusted HTTPS with no browser warnings.
+Bring a domain that Linode DNS hosts and the platform creates the records and a free Let's Encrypt wildcard certificate. Students get trusted HTTPS with no browser warning:
 
 ```bash
-./deploy.sh deploy --domain example.com
+./deploy.sh --domain example.com
 # Students get: https://s01.workshop.example.com/
 ```
 
-If you deploy without a domain (the default), the platform uses [sslip.io](https://sslip.io) for DNS. sslip.io is a free public DNS service that maps hostnames like `172-238-62-203.sslip.io` to the embedded IP address. This gives each student a unique subdomain for ingress routing without any domain purchase or DNS configuration.
+Without a domain, the platform uses [sslip.io](https://sslip.io) hostnames and a self-signed certificate. The connection is encrypted, but browsers show a warning that students accept once. Use this for internal tests. Use a real domain for anything customer facing.
 
-Because you do not control the `sslip.io` DNS zone, the platform cannot complete a Let's Encrypt DNS-01 challenge. It falls back to a self-signed certificate instead. The connection is still encrypted, but browsers show a "Not Secure" warning. Students accept the warning once and proceed normally.
+## Inputs
 
-!!! note
-    For production or customer-facing workshops, use a real domain. For internal testing or instructor-led sessions where you can walk students through the browser warning, sslip.io works fine.
-
-## Multi-model deployments
-
-The platform can deploy two or more models behind a single endpoint. When you select multiple models (comma-separated), the platform provisions independent GPU node pools per model and deploys [agentgateway](https://agentgateway.dev) as a lightweight routing proxy. Students use one `VLLM_HOST` and select the model with the standard `model` field in their API requests, with no code changes.
-
-```bash
-# Dry-run: see per-model GPU breakdown, gateway routing, and total cost
-./deploy.sh --dry-run --students 40 --model "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
-
-# Deploy with multiple models
-./deploy.sh --students 40 --model "Qwen/Qwen3-8B-FP8,deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
-```
-
-In `config.yaml`, use the `models:` key instead of `model:`:
-
-```yaml
-models: "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
-```
-
-Single-model deployments are unchanged: no gateway is deployed, and `VLLM_HOST` points directly to vLLM. Multi-model adds an agentgateway Deployment that reads the `model` field from the JSON request body and routes to the correct `vllm-<slug>:8000` backend. See [`infra/docs/architecture.md`](infra/docs/architecture.md) for the routing diagram.
-
-### API-key authentication
-
-Multi-model deployments require an API key, because students share one gateway. The platform mints a key at deploy time, stores it in the `gateway-api-keys` Secret (agentgateway `apiKeyAuthentication`, mode `Strict`), and injects it into every workspace as `VLLM_API_KEY`. Clients send it as `Authorization: Bearer`, so students do nothing. The key is printed in the "Classroom ready" summary.
-
-The gateway routes requests; it does not act as a passthrough, so it does not serve `GET /v1/models`. List the available models in one of two ways:
-
-```bash
-echo $MODEL_NAMES                              # inside a workspace
-kubectl -n workshop get agentgatewaybackends   # from the cluster
-```
-
-!!! note
-    The workshop uses a single shared key, which is fine for a time-boxed class. For production, issue one key per identity and add key rotation.
-
-## Component model
-
-With no preset, the inputs above provision the **default** workshop shape: a browser
-code-server per student plus one shared vLLM endpoint. Other workshops are composed from
-a catalog of independent, per-student **components**. The wizard's **Workshop** step
-picks a ready-made composition (a `preset`, e.g. the Solution Architect Agent); to set
-components individually, use the config file or flags. Every component defaults to today's
-behavior, so a deploy that applies no preset and sets none of them is byte-identical to
-the original platform.
-
-| Component | Values (default first) | Controls |
+| Input | Default | Meaning |
 |---|---|---|
-| `editor` | `code-server` \| `jupyter` | The workspace UI |
-| `inference` | `shared-vllm` \| `dedicated-vllm` \| `external` | Where the model comes from. `dedicated-vllm` requires `cluster_access: scoped`; `external` requires `--inference-endpoint <url>` (optional `--inference-api-key`) |
-| `gpus_per_student` | `1` | GPUs for `dedicated-vllm` (2 reserved for v2) |
-| `predownload_models` | _(empty)_ | `dedicated-vllm` only: comma-separated models pre-pulled into each student's PVC so switching the served model (kubectl patch of `--model`) is a fast restart-from-cache, not a re-download |
-| `model_mirror_bucket` | _(empty)_ | `dedicated-vllm` only: sync models from an in-region Object Storage mirror (seeded by `make mirror-models`) instead of Hugging Face — avoids HF rate-limiting at large scale. Auto-detected from `infra/model-mirror.conf` |
-| `gpu_sharing` | `none` \| `timeslicing` | NVIDIA time-slicing so two vLLMs share one card (the [two-models lab](infra/docs/gpu-sharing.md)); needs `dedicated-vllm` |
-| `gpu_timeslicing_replicas` | `2` | Logical GPUs advertised per physical card when `gpu_sharing: timeslicing` (must be >= 2) |
-| `cluster_access` | `none` \| `scoped` | Per-student namespace + scoped kubeconfig + NetworkPolicy (in-notebook `kubectl`) |
-| `object_storage` | `none` \| `managed` | Per-student bucket + bucket-scoped key, created on an **E3** Object Storage endpoint |
-| `object_storage_region` | cluster region | Region for managed buckets. Must have an E3 endpoint (for example `us-ord`). Buckets never go to `us-sea`; a `us-sea` cluster uses `us-ord` unless you set this |
-| `agent_deploy` | `none` \| `plain` | Ship the student's agent to their namespace (requires `cluster_access: scoped`) |
+| `label` | `ai-agents-workshop` | Deployment name. Becomes the LKE cluster label. CLI: `--name` or `--label` |
+| `students` | `80` | Number of student workspaces |
+| `preset` | none with `--yes`; `solution-architect-agent` in the wizard | One of the three workshops above, or `custom`. A preset only fills values you left unset |
+| `model` | `Qwen/Qwen3-8B-FP8` | Any ungated Hugging Face model id. `make models` lists the catalog. Comma-separated ids deploy several models behind one gateway |
+| `content_repo` | `""` | Git repo cloned into each workspace at startup. Blank uses `ai-agents-workshop`. Accepts a URL, `owner/repo`, or a bare name |
+| `domain` | `""` | Blank uses sslip.io and a self-signed certificate. A domain uses Linode DNS and Let's Encrypt |
+| `region` | nearest GPU region | Picked from the live list of GPU regions. GPU stock varies by region and by day |
+| `k8s_version` | auto | 1.37 when LKE offers it, otherwise the newest LKE offers |
 
-```yaml
-# config.yaml — an "own your inference" workshop
-editor:           jupyter
-inference:        dedicated-vllm
-cluster_access:   scoped
-```
+Anything you leave out, the wizard fills in: GPU plan, tensor parallel size, replica and node counts. The per-student components behind the presets (editor, inference, cluster access, Object Storage, GPU sharing, agent deploy) are documented in [`infra/docs/components.md`](infra/docs/components.md) and listed in `config.example.yaml`.
 
-```bash
-./deploy.sh deploy --config config.yaml      # or --editor jupyter --inference dedicated-vllm ...
-```
+## Good to know
 
-Two ready-made compositions ship in [`examples/`](examples/):
-
-```bash
-# Own-your-inference: jupyter + a dedicated, under-tuned vLLM per student to tune via kubectl
-make deploy ARGS="--config examples/own-inference.yaml"   # or: --preset own-inference
-
-# SA-agent: jupyter + scoped kubectl + a managed per-student bucket + ship-the-agent capstone
-make deploy ARGS="--config examples/sa-agent.yaml"        # or: --preset solution-architect-agent
-```
-
-These two are the same compositions the wizard's **Workshop** step offers as presets;
-the SA-agent is the interactive default.
-
-Verify without provisioning anything:
-
-```bash
-make verify-default                                  # the default path is byte-identical
-make verify-config CONFIG=examples/own-inference.yaml # a composed config dry-runs cleanly
-```
-
-When `cluster_access: scoped` or `object_storage: managed` is set, each printed access card
-also notes the student's namespace and that their kubeconfig / bucket is pre-wired (no secret
-material on the card). See `config.example.yaml` for the full catalog and [`PLAN.md`](PLAN.md)
-for the design.
-
-### Large classes & operations
-
-- **Beyond 100 students.** LKE caps a single node pool at 100 nodes; the GPU pool is automatically split into ≤100-node pools that share the `pool=gpu` label, so a 200-student `dedicated-vllm` class provisions in one cluster.
-- **Model mirror (avoid Hugging Face throttling).** At large scale, every per-student vLLM pulling from huggingface.co at once gets rate-limited (`SlowDown`). Seed an Object Storage mirror once — `make mirror-models ARGS="--bucket <globally-unique-name> --region us-ord"` — and `make deploy` auto-uses it (pods `aws s3 sync` from the bucket with adaptive-retry backoff). See [`infra/docs/ai-inference-workshop.md`](infra/docs/ai-inference-workshop.md).
-- **Object Storage policy: E3 endpoints only, never `us-sea`.** Every bucket the platform creates (per-student buckets, the model mirror) is created with `endpoint_type: E3` and its S3 hostname is read back from the API (for example `us-ord-10.linodeobjects.com`). `us-sea` has no E3 endpoint and is not used for storage on this account; GPU nodes in `us-sea` are fine, and such a cluster keeps its buckets in `us-ord`. `deploy.sh` checks both rules against the API before Terraform runs.
-- **Kubernetes version.** LKE retires old minors. `deploy.sh` asks the API which versions are offered, uses `1.37` when it is still offered, and otherwise falls back to the newest one with a warning. Pin with `--k8s-version` or `k8s_version:` only if you need to.
-- **Refresh content on running pods.** After pushing to the content repo, `make refresh-content` pulls the latest into every running workspace — no redeploy, no pod recreation.
-
-## Cost
-
-GPU nodes bill by the hour, and the wizard prints an estimate before you confirm. A typical 80-student class (`Qwen3-8B-FP8` on 5 `g2-gpu-rtx4000a4-s` GPU nodes plus 5 CPU nodes) costs roughly **$15.88/hr**, or about $64 for a 4-hour class. A single-GPU capacity-probe box (one `g2-gpu-rtx4000a1-s` GPU node plus one CPU node) costs about $0.74/hr.
-
-For the full breakdown, the sizing formula, and the GPU-plan decode, see [`infra/docs/cost.md`](infra/docs/cost.md) and [`infra/docs/sizing.md`](infra/docs/sizing.md).
+- **Capacity.** The wizard checks the public GPU stock feed before it provisions, but that feed is advisory. The provision itself is the real test. If a region is out of stock, pick another one.
+- **Inference is private.** vLLM and the multi-model gateway sit behind ClusterIP services and a default-deny NetworkPolicy. From outside the cluster, the only way in is `kubectl port-forward`.
+- **Object Storage policy.** Every bucket the platform creates uses an E3 endpoint, and buckets never go to `us-sea`. A `us-sea` cluster keeps its buckets in `us-ord`.
+- **Large classes.** LKE caps a node pool at 100 nodes, so the GPU pool splits into pools of 100 when needed. Above a few dozen students, seed a model mirror in Object Storage so Hugging Face does not throttle the downloads. See [`infra/docs/components.md`](infra/docs/components.md).
+- **Content updates.** After you push to the content repo, `make refresh-content` pulls it into every running workspace. No redeploy.
 
 ## Documentation
 
-- [`PLAN.md`](PLAN.md): the component-model design blueprint
-- [`infra/README.md`](infra/README.md): infrastructure details
-- [`infra/docs/quickstart.md`](infra/docs/quickstart.md): step-by-step deploy, port-forward, and teardown
-- [`infra/docs/architecture.md`](infra/docs/architecture.md): the layers, the Helm chart, and what each value controls
-- [`infra/docs/sizing.md`](infra/docs/sizing.md): GPU-plan decode, the sizing formula, model catalog, and regions
-- [`infra/docs/cost.md`](infra/docs/cost.md): the `$/hr` breakdown and how to keep the bill down
-- [`infra/docs/gpu-sharing.md`](infra/docs/gpu-sharing.md): time-slicing for two models on one GPU (the module-07 lab)
-- [`examples/README.md`](examples/README.md): default content and how to bring your own
-- [`infra/docs/runbook.md`](infra/docs/runbook.md), [`infra/docs/security.md`](infra/docs/security.md), and [`infra/docs/troubleshooting.md`](infra/docs/troubleshooting.md): operations, security posture, and troubleshooting
+- [`infra/docs/quickstart.md`](infra/docs/quickstart.md): deploy, port-forward, and teardown step by step
+- [`infra/docs/runbook.md`](infra/docs/runbook.md): the classroom-day checklist
+- [`infra/docs/components.md`](infra/docs/components.md): the per-student components, the model mirror, and classes over 100
+- [`infra/docs/architecture.md`](infra/docs/architecture.md): the layers, the Helm chart, multi-model routing, and workspace environment variables
+- [`infra/docs/sizing.md`](infra/docs/sizing.md) and [`infra/docs/cost.md`](infra/docs/cost.md): GPU plans, the sizing formula, and the hourly bill
+- [`infra/docs/gpu-sharing.md`](infra/docs/gpu-sharing.md): two models on one GPU with time-slicing
+- [`infra/docs/security.md`](infra/docs/security.md) and [`infra/docs/troubleshooting.md`](infra/docs/troubleshooting.md): the security model and what to do when something breaks
+- [`examples/README.md`](examples/README.md): bringing your own content
+- [`PLAN.md`](PLAN.md) and [`infra/docs/dev.md`](infra/docs/dev.md): design notes and verification steps for contributors
 
-## About the Author
+## About the author
 
->This project was created by **Du'An Lightfoot**, a developer passionate about AI agents, cloud infrastructure, and teaching in public.
->
->Learn more and connect:
->- 🌐 Website: [duanlightfoot.com](https://duanlightfoot.com)
->- 📺 YouTube: [@LabEveryday](https://www.youtube.com/@LabEveryday)
->- 🐙 GitHub: [@labeveryday](https://github.com/labeveryday)
+This project was created by Du'An Lightfoot, a developer who works on AI agents and cloud infrastructure and teaches in public.
+
+- Website: [duanlightfoot.com](https://duanlightfoot.com)
+- YouTube: [@LabEveryday](https://www.youtube.com/@LabEveryday)
+- GitHub: [@labeveryday](https://github.com/labeveryday)

@@ -5,6 +5,20 @@ All notable changes to this project are documented here. Format follows
 
 ## Unreleased — Pre-workshop hardening (2026-11-07)
 
+- **Deploy never destroys infrastructure.** `provision.sh` now runs `terraform plan` first and
+  refuses to apply a plan that deletes the LKE cluster or a node pool unless
+  `AWP_ALLOW_DESTROY=1` is set. On 2026-11-08 a re-deploy of a 25-student class removed the
+  25-node GPU pool and the script carried on; the plan is now visible in the log and stops.
+- **One slow student no longer aborts the deploy.** The per-student vLLM wait used a 30-minute
+  budget per student in sequence and `exit 1` on the first miss, which stopped the run before
+  TLS and the workspaces. It now waits for all students under one deadline
+  (`VLLM_WAIT_SECONDS`, default 2700), prints a ready count every 30 s, and on stragglers
+  prints their events and continues. The final summary shows `vLLM ready: N/M`.
+- **README rewritten for instructors.** Opens with the three workshop presets and their
+  20-student cost, a four-step quick start, and the teardown command. The component
+  catalog, model mirror, and 100-node pool split moved to `infra/docs/components.md`;
+  multi-model setup and the workspace environment variables moved to
+  `infra/docs/architecture.md`. MkDocs admonitions replaced with GitHub alerts.
 - **Kubernetes version preflight** (`deploy.sh`): LKE retired 1.34, the hardcoded default,
   so `terraform apply` 400'd. `deploy.sh` now lists the versions LKE offers after the token
   check, uses `1.37` (the rehearsed default) when offered, otherwise the newest offered

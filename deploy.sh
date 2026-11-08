@@ -1307,6 +1307,21 @@ echo ""
 printf "  ${DIM}%-14s${RESET} %s\n" "Base host:"    "$BASE_HOST"
 printf "  ${DIM}%-14s${RESET} %s\n" "Model(s):"     "${MODELS//,/, }"
 printf "  ${DIM}%-14s${RESET} %s\n" "Inference:"    "${INFER_EP}  (in-cluster only)"
+if [[ "$INFERENCE" == "dedicated-vllm" ]]; then
+    # Per-student vLLMs: provision.sh no longer aborts on stragglers, so say where they stand.
+    _VLLM_READY=0; _VLLM_LATE=""
+    for _i in $(seq 1 "$STUDENTS"); do
+        _ns="$(printf '%s-s%02d' "$NAMESPACE" "$_i")"
+        _av="$(kubectl -n "$_ns" get deployment/vllm -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+        if [[ "${_av:-0}" -ge 1 ]]; then _VLLM_READY=$((_VLLM_READY + 1)); else _VLLM_LATE="${_VLLM_LATE} ${_ns}"; fi
+    done
+    if [[ "$_VLLM_READY" -eq "$STUDENTS" ]]; then
+        printf "  ${DIM}%-14s${RESET} %s\n" "vLLM ready:"   "${_VLLM_READY}/${STUDENTS}"
+    else
+        printf "  ${DIM}%-14s${RESET} ${YELLOW}%s${RESET}\n" "vLLM ready:" "${_VLLM_READY}/${STUDENTS}  still starting:${_VLLM_LATE}"
+        printf '%b\n' "  ${DIM}               re-check: kubectl get deploy -A -l app=vllm${RESET}"
+    fi
+fi
 [[ -n "$EMBEDDING_MODEL" ]] && \
     printf "  ${DIM}%-14s${RESET} %s\n" "Embedding:"  "${EMBEDDING_MODEL}  (\$EMBEDDING_BASE_URL → gateway)"
 if [[ -n "$GATEWAY_API_KEY" ]]; then

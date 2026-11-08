@@ -93,8 +93,29 @@ Agentgateway (content-based routing on "model" field)
     └──► vllm-qwen3-14b:8000      (GPU pool 2, label pool=gpu-qwen-qwen3-14b-fp8)
 ```
 
-Single-model deployments skip the gateway entirely — `VLLM_HOST` points directly to
-`vllm:8000` and the cluster layout is identical to the single-model diagram above.
+Single-model deployments skip the gateway. `VLLM_HOST` points directly to `vllm:8000`
+and the cluster layout is identical to the single-model diagram above.
+
+### Turning multi-model on
+
+Pass two or more comma-separated model ids. The dry run shows the per-model GPU
+breakdown, the gateway routing, and the total cost:
+
+```bash
+./deploy.sh --dry-run --students 40 --model "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
+./deploy.sh --students 40 --model "Qwen/Qwen3-8B-FP8,deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+```
+
+In `config.yaml`, use the `models:` key instead of `model:`:
+
+```yaml
+models: "Qwen/Qwen3-8B-FP8,Qwen/Qwen3-14B-FP8"
+```
+
+Multi-model deployments share one gateway, so they require an API key. The platform
+mints one at deploy time and injects it into every workspace, so students do nothing.
+The key is printed in the "Classroom ready" summary. One shared key is fine for a
+time-boxed class. For anything longer lived, issue one key per identity and rotate them.
 
 ### Multi-model Helm values
 
@@ -122,6 +143,19 @@ gpu_pools = [
   { type = "g2-gpu-rtx4000a2-s", count = 1, label = "gpu-qwen-qwen3-14b-fp8" },
 ]
 ```
+
+## Workspace environment variables
+
+Every workspace pod gets the inference endpoint under two naming conventions, so content
+written for either one connects with no student configuration:
+
+| Variable | Meaning |
+|---|---|
+| `VLLM_HOST`, `MODEL_NAME` | The platform's names: the OpenAI-compatible base URL and the served model id |
+| `VLLM_BASE_URL`, `VLLM_MODEL_ID` | The same two values under the names the Solution Architect Agent notebooks read |
+| `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL_ID` | Set only when an embedding model is deployed |
+| `VLLM_API_KEY` | Multi-model only: the gateway key, sent as `Authorization: Bearer` |
+| `MODEL_NAMES` | Multi-model only: the list of served model ids |
 
 ## Inference is private by design
 
